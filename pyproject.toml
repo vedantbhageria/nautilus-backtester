@@ -1,0 +1,25 @@
+[project]
+name = "nautilus-trading"
+version = "0.1.0"
+description = "NautilusTrader backtesting + live pipeline with a streaming dashboard"
+requires-python = ">=3.11"
+dependencies = [
+    "nautilus_trader",
+    "fastapi",
+    "uvicorn[standard]",
+    "redis",
+    "python-dotenv",
+    "pyarrow",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

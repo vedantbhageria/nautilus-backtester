@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Virtual env
+.venv/
+venv/
+
+# Environment / secrets
+.env
+
+# Data catalog & artifacts (kept out of source tree and OneDrive sync)
+data/
+catalog/
+*.parquet
+logs/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
