@@ -1,18 +1,40 @@
+import os
+from urllib.parse import urlparse
+
+from dotenv import load_dotenv
+
 from nautilus_trader.config import TradingNodeConfig
-from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import TraderId
-from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.config import LiveExecEngineConfig
-from nautilus_trader.config import InstrumentProviderConfig
 from nautilus_trader.config import LiveDataEngineConfig
 from nautilus_trader.config import CacheConfig
-from nautilus_trader.adapters.binance import BINANCE
+from nautilus_trader.config import MessageBusConfig
+from nautilus_trader.config import DatabaseConfig
+from nautilus_trader.model.identifiers import Venue
+from nautilus_trader.model.instruments import CryptoPerpetual, CryptoFuture, CurrencyPair
 from nautilus_trader.adapters.binance import BinanceDataClientConfig
 from nautilus_trader.adapters.binance import BinanceExecClientConfig
 from nautilus_trader.adapters.binance import BinanceAccountType
 from nautilus_trader.adapters.binance import BinanceInstrumentProviderConfig
 from nautilus_trader.adapters.binance.common.enums import BinanceEnvironment
+
+BINANCE_SPOT = "BINANCE_SPOT"          # instruments -> e.g. BTCUSDT.BINANCE_SPOT
+BINANCE_FUTURES = "BINANCE_FUTURES"    # instruments -> e.g. BTCUSDT-PERP.BINANCE_FUTURES
+
+load_dotenv()
+_redis = urlparse(os.getenv("REDIS_URL", "redis://localhost:6379"))
+redis_db = DatabaseConfig(
+    type="redis",
+    host=_redis.hostname or "localhost",
+    port=_redis.port or 6379,
+    username=_redis.username,
+    password=_redis.password,
+)
+
+_retention = int(os.getenv("STREAM_RETENTION_MINS", "4320"))  # 3 days
+STREAM_RETENTION_MINS = _retention if _retention > 0 else None
+CATALOG_PATH = os.getenv("CATALOG_PATH", "C:/nautilus/catalog")
 
 
 config_node = TradingNodeConfig(
@@ -25,7 +47,7 @@ config_node = TradingNodeConfig(
         use_pyo3=True,
     ),
     data_engine=LiveDataEngineConfig(
-        external_clients=[ClientId(BINANCE)],
+   
     ),
     exec_engine=LiveExecEngineConfig(
         reconciliation=True,
@@ -44,32 +66,41 @@ config_node = TradingNodeConfig(
         graceful_shutdown_on_exception=True,
     ),
     cache=CacheConfig(
-        # database=DatabaseConfig(),
+        database=redis_db,
         timestamps_as_iso8601=True,
         flush_on_start=False,
     ),
+    message_bus=MessageBusConfig(
+        database=redis_db,
+        encoding="json",
+        timestamps_as_iso8601=True,
+        stream_per_topic=True,
+        streams_prefix="stream",
+        autotrim_mins=STREAM_RETENTION_MINS,
+        heartbeat_interval_secs=1,
+        types_filter=[CryptoPerpetual, CryptoFuture, CurrencyPair],
+    ),
     data_clients={
-        BINANCE: BinanceDataClientConfig(
-            account_type=BinanceAccountType.USDT_FUTURES,
+        BINANCE_SPOT: BinanceDataClientConfig(
+            venue=Venue(BINANCE_SPOT),
+            account_type=BinanceAccountType.SPOT,
             environment=BinanceEnvironment.DEMO,
+            use_agg_trade_ticks=True,  
             instrument_provider=BinanceInstrumentProviderConfig(
                 load_all=True,
-                query_commission_rates=True,
+            ),
+        ),
+        BINANCE_FUTURES: BinanceDataClientConfig(
+            venue=Venue(BINANCE_FUTURES),
+            account_type=BinanceAccountType.USDT_FUTURES,
+            environment=BinanceEnvironment.DEMO,
+            use_agg_trade_ticks=True,
+            instrument_provider=BinanceInstrumentProviderConfig(
+                load_all=True,
             ),
         ),
     },
-    exec_clients={
-        BINANCE: BinanceExecClientConfig(
-            account_type=BinanceAccountType.USDT_FUTURES,
-            environment=BinanceEnvironment.DEMO,
-            instrument_provider=BinanceInstrumentProviderConfig(
-                load_all=True,
-                query_commission_rates=True,
-            ),
-            max_retries=3,
-            log_rejected_due_post_only_as_warning=False,
-        ),
-    },
+    exec_clients={},
     timeout_connection=30.0,
     timeout_reconciliation=10.0,
     timeout_portfolio=10.0,

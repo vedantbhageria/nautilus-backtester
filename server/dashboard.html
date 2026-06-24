@@ -1,0 +1,907 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Nautilus Market Pipeline</title>
+<style>
+  /* Aesthetic reused from the original market-pipeline dashboard. */
+  :root{
+    --bg:#0a0b0d; --panel:#121419; --panel-2:#1a1d24;
+    --line:#2a2e38; --line-soft:#1c1f27;
+    --text:#e8eaed; --dim:#9aa0aa; --dim-2:#5a606b;
+    --amber:#e0a233; --green:#26a69a; --red:#ef5350; --blue:#4f9dde;
+    --mono:'SF Mono','Roboto Mono',Menlo,Consolas,'Courier New',monospace;
+  }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; height:100%; background:var(--bg); color:var(--text); font-family:var(--mono); font-size:13px; }
+  body{ display:flex; flex-direction:column; }
+
+  /* Header */
+  header{ display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding:12px 20px; border-bottom:1px solid var(--line-soft); background:var(--panel); flex-shrink:0; }
+  .title{ font-size:13px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; color:var(--amber); }
+  .live-dot{ width:8px; height:8px; border-radius:50%; background:var(--green); box-shadow:0 0 8px var(--green); animation:pulse 1.6s infinite; }
+  .live-dot.off{ background:var(--red); box-shadow:0 0 8px var(--red); animation:none; }
+  @keyframes pulse{ 0%,100%{opacity:1} 50%{opacity:.3} }
+  .conn{ font-size:11px; color:var(--dim); letter-spacing:.04em; }
+  select,input{ appearance:none; background:var(--panel-2); border:1px solid var(--line); color:var(--text); font-family:var(--mono); font-size:12.5px; font-weight:600; padding:7px 11px; border-radius:7px; outline:none; transition:border-color .15s; }
+  select:focus,input:focus{ border-color:var(--amber); }
+  .addbar{ display:flex; align-items:center; gap:8px; margin-left:auto; }
+  button.btn{ background:var(--panel-2); border:1px solid var(--line); color:var(--dim); font-family:var(--mono); font-size:11.5px; font-weight:700; letter-spacing:.04em; padding:7px 12px; border-radius:7px; cursor:pointer; transition:.15s; }
+  button.btn:hover{ border-color:var(--amber); color:var(--text); }
+
+  /* Layout */
+  .body-row{ display:flex; flex:1; overflow:hidden; }
+  .watch-col{ width:210px; flex:0 0 auto; display:flex; flex-direction:column; border-right:1px solid var(--line-soft); overflow:hidden; }
+  .col-head{ padding:9px 13px 7px; font-size:9px; letter-spacing:.12em; text-transform:uppercase; color:var(--dim-2); border-bottom:1px solid var(--line-soft); flex-shrink:0; }
+  .watch-list{ flex:1; overflow-y:auto; }
+  .watch-row{ display:flex; align-items:center; gap:6px; padding:8px 13px; cursor:pointer; border-bottom:1px solid var(--line-soft); }
+  .watch-row:hover{ background:var(--panel-2); }
+  .watch-row.active{ background:#16140d; border-left:2px solid var(--amber); }
+  .watch-row .wr-name{ flex:1; font-weight:700; font-size:11px; }
+  .watch-row .wr-venue{ font-size:8.5px; color:var(--dim-2); letter-spacing:.08em; }
+  .watch-row .wr-last{ font-weight:700; font-variant-numeric:tabular-nums; }
+  .flash-up{ animation:fu .5s; } .flash-down{ animation:fd .5s; }
+  @keyframes fu{ 0%{background:rgba(38,166,154,.25)} 100%{} }
+  @keyframes fd{ 0%{background:rgba(239,83,80,.25)} 100%{} }
+
+  .main-col{ flex:1; min-width:0; display:flex; flex-direction:column; overflow:hidden; }
+  .chart-head{ display:flex; align-items:center; gap:14px; padding:10px 16px; border-bottom:1px solid var(--line-soft); flex-shrink:0; }
+  .chart-head .sym{ font-weight:700; font-size:15px; letter-spacing:.04em; color:var(--amber); }
+  .chart-head .px{ font-size:15px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .chart-head .chg{ font-size:11.5px; font-weight:700; }
+  .up{ color:var(--green); } .down{ color:var(--red); }
+  .ranges{ display:flex; gap:5px; margin-left:auto; }
+  .ranges button{ background:var(--panel-2); border:1px solid var(--line); color:var(--dim); font-family:var(--mono); font-size:11px; font-weight:600; padding:6px 10px; border-radius:6px; cursor:pointer; }
+  .ranges button.active{ border-color:var(--amber); color:var(--amber); background:#1d1a12; }
+  .chartwrap{ flex:1 1 0; min-height:0; position:relative; margin:12px 16px 4px; display:flex; flex-direction:column; }
+  .chartwrap canvas{ display:block; width:100%; }
+  #chart{ flex:1 1 0; min-height:0; }
+  #oscPanel{ flex:0 0 auto; height:90px; border-top:1px solid var(--line-soft); display:none; overflow:hidden; }
+  #oscPanel canvas{ height:100%; }
+  .chart-empty{ position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--dim-2); font-size:12px; }
+  /* Backfill loading indicator (indeterminate sweep, top of chart) */
+  .loading-bar{ position:absolute; top:0; left:0; right:0; height:2px; overflow:hidden; display:none; pointer-events:none; }
+  .loading-bar.on{ display:block; }
+  .loading-bar::before{ content:""; position:absolute; height:100%; width:35%; background:var(--amber); box-shadow:0 0 8px var(--amber); animation:lsweep 1.1s ease-in-out infinite; }
+  @keyframes lsweep{ 0%{left:-35%} 100%{left:100%} }
+  .loading-pill{ position:absolute; top:8px; left:50%; transform:translateX(-50%); display:none; align-items:center; gap:6px; background:var(--panel-2); border:1px solid var(--amber); color:var(--amber); font-size:10.5px; font-weight:700; letter-spacing:.06em; padding:4px 10px; border-radius:12px; pointer-events:none; }
+  .loading-pill.on{ display:flex; }
+  .loading-pill .dot{ width:6px; height:6px; border-radius:50%; background:var(--amber); animation:pulse 1s infinite; }
+  /* Timeframe (candle) slider bar */
+  .tf-bar{ display:flex; align-items:center; gap:10px; padding:8px 16px 0; }
+  .tf-bar .tf-label{ font-size:9px; letter-spacing:.12em; text-transform:uppercase; color:var(--dim-2); }
+  .tf-bar input[type=range]{ -webkit-appearance:none; appearance:none; width:200px; height:4px; background:var(--line); border-radius:2px; outline:none; padding:0; }
+  .tf-bar input[type=range]::-webkit-slider-thumb{ -webkit-appearance:none; appearance:none; width:14px; height:14px; border-radius:50%; background:var(--amber); cursor:pointer; }
+  .tf-bar input[type=range]::-moz-range-thumb{ width:14px; height:14px; border:none; border-radius:50%; background:var(--amber); cursor:pointer; }
+  .tf-bar .tf-val{ font-size:12px; font-weight:700; color:var(--amber); min-width:34px; }
+  .tf-bar .tf-hint{ font-size:9.5px; color:var(--dim-2); }
+  /* Indicator checkbox bar */
+  .ind-bar{ display:flex; align-items:center; gap:8px; padding:5px 16px 0; flex-wrap:wrap; }
+  .ind-sep{ width:1px; height:12px; background:var(--line); flex-shrink:0; }
+  .ind-cb{ display:flex; align-items:center; gap:4px; font-size:10px; color:var(--dim); cursor:pointer; user-select:none; white-space:nowrap; }
+  .ind-cb:hover{ color:var(--text); }
+  .ind-cb input[type=checkbox]{ width:11px; height:11px; cursor:pointer; accent-color:var(--amber); margin:0; }
+  /* Strategy list */
+  .strat-row{ display:flex; align-items:center; justify-content:space-between; padding:7px 10px; margin:0 11px 5px; background:var(--panel-2); border:1px solid var(--line-soft); border-radius:7px; cursor:pointer; transition:.12s; }
+  .strat-row:hover{ border-color:var(--amber); }
+  .strat-row .sr-name{ font-size:11px; font-weight:700; color:var(--text); }
+  .strat-row .sr-px{ font-size:11px; font-weight:700; font-variant-numeric:tabular-nums; color:var(--dim); }
+  /* Strategy modal */
+  .strat-modal-backdrop{ position:fixed; inset:0; z-index:200; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; }
+  .strat-modal-card{ background:var(--panel); border:1px solid var(--line); border-radius:10px; width:420px; max-height:78vh; overflow-y:auto; padding:18px 20px 20px; position:relative; }
+  .strat-modal-card::-webkit-scrollbar{ width:4px; } .strat-modal-card::-webkit-scrollbar-thumb{ background:var(--line); border-radius:2px; }
+  .strat-modal-hd{ display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
+  .strat-modal-hd .sm-name{ font-size:14px; font-weight:700; color:var(--amber); }
+  .strat-modal-hd button{ background:none; border:1px solid var(--line); color:var(--dim); font-family:var(--mono); font-size:13px; width:26px; height:26px; border-radius:5px; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+  .strat-modal-hd button:hover{ border-color:var(--amber); color:var(--text); }
+  .strat-modal-desc{ font-size:10.5px; color:var(--dim); line-height:1.5; margin-bottom:12px; padding:8px 10px; background:var(--panel-2); border-radius:6px; border:1px solid var(--line-soft); }
+  .strat-modal-sec{ font-size:9px; letter-spacing:.12em; text-transform:uppercase; color:var(--dim-2); margin:10px 0 6px; }
+
+  .right-col{ width:280px; flex:0 0 auto; display:flex; flex-direction:column; border-left:1px solid var(--line-soft); overflow-y:auto; }
+  .panel{ border-bottom:1px solid var(--line-soft); }
+  .panel-head{ padding:9px 13px 7px; font-size:9px; letter-spacing:.12em; text-transform:uppercase; color:var(--dim-2); }
+  .tile{ background:var(--panel-2); border:1px solid var(--line-soft); border-radius:7px; padding:7px 11px; margin:0 11px 7px; display:flex; align-items:center; }
+  .tile .lbl{ font-size:9px; letter-spacing:.1em; text-transform:uppercase; color:var(--dim-2); flex:1; }
+  .tile .val{ font-size:13px; font-weight:700; font-variant-numeric:tabular-nums; }
+  /* Trade tape */
+  .tape{ max-height:240px; overflow-y:auto; padding:2px 11px 8px; }
+  .tape-row{ display:flex; gap:8px; font-size:11px; padding:2px 0; font-variant-numeric:tabular-nums; }
+  .tape-row .tt-t{ color:var(--dim-2); width:84px; } .tape-row .tt-p{ flex:1; text-align:right; font-weight:700; } .tape-row .tt-q{ width:64px; text-align:right; color:var(--dim); }
+  /* Quote/spread */
+  .quote{ display:flex; gap:8px; padding:0 11px 8px; }
+  .quote .qbox{ flex:1; background:var(--panel-2); border:1px solid var(--line-soft); border-radius:7px; padding:8px 10px; }
+  .quote .qlbl{ font-size:9px; letter-spacing:.1em; text-transform:uppercase; color:var(--dim-2); }
+  .quote .qval{ font-size:14px; font-weight:700; margin-top:3px; font-variant-numeric:tabular-nums; }
+  /* Backfill */
+  .bf{ padding:2px 11px 11px; display:flex; flex-direction:column; gap:7px; }
+  .bf input{ width:100%; font-size:11px; }
+  .bf .bf-row{ display:flex; gap:7px; }
+  .bf .note{ font-size:9.5px; color:var(--dim-2); line-height:1.4; }
+  footer{ display:flex; gap:18px; padding:7px 20px; border-top:1px solid var(--line-soft); background:var(--panel); font-size:10.5px; color:var(--dim-2); flex-shrink:0; }
+  footer b{ color:var(--text); font-weight:700; }
+</style>
+</head>
+<body>
+  <header>
+    <span class="live-dot" id="connDot"></span>
+    <span class="title">Nautilus Pipeline</span>
+    <span class="conn" id="connTxt">connecting…</span>
+    <div class="addbar">
+      <input id="addInput" list="symList" placeholder="add instrument, enter…" autocomplete="off" />
+      <datalist id="symList"></datalist>
+      <button class="btn" id="addBtn">add</button>
+    </div>
+  </header>
+
+  <div class="body-row">
+    <!-- Watchlist -->
+    <div class="watch-col">
+      <div class="col-head">Instruments</div>
+      <div class="watch-list" id="watchList"></div>
+    </div>
+
+    <!-- Main chart -->
+    <div class="main-col">
+      <div class="chart-head">
+        <span class="sym" id="mSym">—</span>
+        <span class="px" id="mPx">–</span>
+        <span class="chg" id="mChg"></span>
+        <div class="ranges" id="ranges">
+          <button data-w="2m">2m</button>
+          <button data-w="10m" class="active">10m</button>
+          <button data-w="30m">30m</button>
+          <button data-w="1h">1h</button>
+          <button data-w="4h">4h</button>
+          <button data-w="1d">1d</button>
+          <button data-w="3d">3d</button>
+        </div>
+      </div>
+      <div class="tf-bar">
+        <span class="tf-label">candles</span>
+        <input type="range" id="tfSlider" min="0" max="7" step="1" value="0" />
+        <span class="tf-val" id="tfVal">tick</span>
+        <span class="tf-hint">tick = raw trades · 1s/5s/15s = INTERNAL · 1m+ = EXTERNAL klines</span>
+      </div>
+      <div class="ind-bar">
+        <span class="tf-label">overlay</span>
+        <label class="ind-cb"><input type="checkbox" id="cbSma"> SMA(20)</label>
+        <label class="ind-cb"><input type="checkbox" id="cbEma"> EMA(20)</label>
+        <label class="ind-cb"><input type="checkbox" id="cbVwap"> VWAP</label>
+        <label class="ind-cb"><input type="checkbox" id="cbBb"> BB(20)</label>
+        <label class="ind-cb"><input type="checkbox" id="cbIchi"> Ichimoku</label>
+        <span class="ind-sep"></span>
+        <label class="ind-cb"><input type="checkbox" id="cbRsi"> RSI(14)</label>
+      </div>
+      <div class="chartwrap">
+        <canvas id="chart"></canvas>
+        <div id="oscPanel"><canvas id="oscChart"></canvas></div>
+        <div class="loading-bar" id="loadingBar"></div><div class="loading-pill" id="loadingPill"><span class="dot"></span>backfilling…</div><div class="chart-empty" id="chartEmpty">select an instrument</div><button id="liveBtn" style="display:none;position:absolute;top:8px;right:8px;align-items:center;gap:5px;background:var(--panel-2);border:1px solid var(--amber);color:var(--amber);font-family:var(--mono);font-size:11px;font-weight:700;padding:5px 10px;border-radius:6px;cursor:pointer;">&#9679; live</button>
+      </div>
+    </div>
+
+    <!-- Right rail -->
+    <div class="right-col">
+      <div class="panel">
+        <div class="panel-head">Data Health</div>
+        <div class="tile"><span class="lbl">source</span><span class="val" id="hSource">live · redis</span></div>
+        <div class="tile"><span class="lbl">packets/s</span><span class="val" id="hPkts">0</span></div>
+        <div class="tile"><span class="lbl">ticks (window)</span><span class="val" id="hTicks">0</span></div>
+        <div class="tile"><span class="lbl">last update</span><span class="val" id="hLast">–</span></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">Portfolio PnL</div>
+        <div class="tile"><span class="lbl">unrealized</span><span class="val" id="pnlUnreal">–</span></div>
+        <div class="tile"><span class="lbl">realized</span><span class="val" id="pnlReal">–</span></div>
+        <div class="tile"><span class="lbl">total pnl</span><span class="val" id="pnlTotal">–</span></div>
+        <div class="panel-head" style="padding-top:2px;">Active Strategies</div>
+        <div id="stratList" style="padding:0 0 8px;"><div style="color:var(--dim-2);font-size:10.5px;padding:4px 11px;">no active strategies</div></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">Quote / Spread</div>
+        <div class="quote">
+          <div class="qbox"><div class="qlbl">bid</div><div class="qval" id="qBid">–</div></div>
+          <div class="qbox"><div class="qlbl">ask</div><div class="qval" id="qAsk">–</div></div>
+          <div class="qbox"><div class="qlbl">spread</div><div class="qval" id="qSpread">–</div></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">Backfill / Gap fill</div>
+        <div class="bf">
+          <div class="bf-row"><input id="bfStart" placeholder="start IST (e.g. 2026-06-20T05:30)" /></div>
+          <div class="bf-row"><input id="bfEnd" placeholder="end IST (optional)" /></div>
+          <button class="btn" id="bfBtn">request backfill</button>
+          <div class="note" id="bfNote">tick/1s/5s/15s → backfills trade ticks + INTERNAL bars server-side. 1m+ → Binance klines.</div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">Trade Tape</div>
+        <div class="tape" id="tape"></div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <span>session <b id="fSession">0s</b></span>
+    <span>received <b id="fBytes">0 B</b></span>
+    <span>instruments <b id="fCount">0</b></span>
+  </footer>
+
+<!-- Strategy drill-down modal -->
+<div id="stratModal" class="strat-modal-backdrop" style="display:none;" onclick="if(event.target===this)closeStratModal()">
+  <div class="strat-modal-card">
+    <div class="strat-modal-hd">
+      <span class="sm-name" id="modalStratName"></span>
+      <button onclick="closeStratModal()">✕</button>
+    </div>
+    <div class="strat-modal-desc" id="modalDesc">–</div>
+    <div class="strat-modal-sec">Strategy PnL</div>
+    <div id="modalPnl"></div>
+    <div class="strat-modal-sec">Live Metrics</div>
+    <div id="modalMetrics"></div>
+    <div class="strat-modal-sec">Open Positions</div>
+    <div id="modalPositions"></div>
+  </div>
+</div>
+
+<script>
+const DEFAULT_WINDOW = "10m";
+const WINDOW_SEC = { "2m":120, "10m":600, "30m":1800, "1h":3600, "4h":14400, "1d":86400, "3d":259200 };
+const MAX_TAPE = 60;
+// Candle timeframes (slider steps). "tick" = raw line; others = INTERNAL candles.
+const TIMEFRAMES = ["tick","1s","5s","15s","1m","5m","15m","1h"];
+const TF_SPEC = { "1s":"1-SECOND","5s":"5-SECOND","15s":"15-SECOND","1m":"1-MINUTE","5m":"5-MINUTE","15m":"15-MINUTE","1h":"1-HOUR" };
+const TF_SEC  = { "1s":1,"5s":5,"15s":15,"1m":60,"5m":300,"15m":900,"1h":3600 };
+// Sub-minute candles don't exist as Binance klines -> INTERNAL (live-aggregated
+// from trades). 1m+ use official EXTERNAL klines (live + backfillable).
+const TF_SOURCE = { "1s":"INTERNAL","5s":"INTERNAL","15s":"INTERNAL","1m":"EXTERNAL","5m":"EXTERNAL","15m":"EXTERNAL","1h":"EXTERNAL" };
+function tfBackfillable(tf){ return TF_SOURCE[tf]==="EXTERNAL"; }
+function barTypeFor(sym, tf){ return TF_SPEC[tf] ? `${sym}-${TF_SPEC[tf]}-LAST-${TF_SOURCE[tf]}` : null; }
+const sessionStart = Date.now();
+let totalBytes = 0;
+
+let ws=null, wsReady=false, pktWS=null;
+const panels = {};         // sym -> {ticks:[{t,v,q}], bars:[{t,o,h,l,c,v}], window, timeframe}
+let active = null;         // selected symbol
+
+// ---------- WebSocket ----------
+function setConn(ok){ document.getElementById("connDot").className="live-dot"+(ok?"":" off"); document.getElementById("connTxt").textContent=ok?"connected":"disconnected"; }
+
+function connectWS(){
+  ws = new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host+"/ws");
+  ws.onopen = () => { wsReady=true; setConn(true); for(const s in panels) sub(s, panels[s].window); };
+  ws.onclose = () => { wsReady=false; setConn(false); setTimeout(connectWS,1000); };
+  ws.onerror = () => { try{ws.close();}catch(e){} };
+  ws.onmessage = (e) => {
+    totalBytes += e.data.length;
+    let m; try{ m=JSON.parse(e.data); }catch(_){ return; }
+    if(m.type==="history") onHistory(m);
+    else if(m.type==="ticks") onTicks(m);
+    else if(m.type==="hist_ticks") onHistTicks(m);
+    else if(m.type==="bar_history") onBarHistory(m);
+    else if(m.type==="bars") onBars(m);
+    else if(m.type==="portfolio") onPortfolio(m);
+    else if(m.type==="indicator_history") onIndicatorHistory(m);
+    else if(m.type==="indicators") onIndicators(m);
+  };
+}
+function connectPackets(){
+  pktWS = new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host+"/ws/packets");
+  pktWS.onmessage = (e) => { let m; try{m=JSON.parse(e.data);}catch{return;} if(m.type==="packets") onPackets(m); };
+  pktWS.onclose = () => setTimeout(connectPackets, 1500);
+  pktWS.onerror = () => { try{pktWS.close();}catch(e){} };
+}
+function sub(sym, window){ if(wsReady) ws.send(JSON.stringify({action:"subscribe", symbols:[sym], window})); }
+function unsub(sym){ if(wsReady) ws.send(JSON.stringify({action:"unsubscribe", symbols:[sym]})); }
+function setWindow(sym, window){ if(wsReady) ws.send(JSON.stringify({action:"set_window", symbol:sym, window})); }
+function refreshBars(sym, barType){ if(wsReady) ws.send(JSON.stringify({action:"refresh_bars", symbol:sym, bar_type:barType})); }
+function refreshIndicators(sym){ if(wsReady) ws.send(JSON.stringify({action:"refresh_indicators", symbol:sym})); }
+
+// ---------- Data ----------
+// Keep up to the WIDEST window in memory (drawLine filters to the current window
+// at draw time). Trimming to the current window would destroy backfilled history
+// the instant a live tick arrives while you're on a small window.
+const MAX_WINDOW_SEC = Math.max.apply(null, Object.values(WINDOW_SEC));
+const MAX_TICKS = 120000;   // hard cap so a long session can't exhaust browser memory
+function trim(p){ const arr=p.ticks; if(!arr.length) return;
+  const cut=arr[arr.length-1].t-MAX_WINDOW_SEC; let i=0; while(i<arr.length && arr[i].t<cut) i++; if(i>0) arr.splice(0,i);
+  if(arr.length>MAX_TICKS) arr.splice(0, arr.length-MAX_TICKS);
+}
+function _mergeTicks(p, incoming){
+  const byKey=new Map(p.ticks.map(x=>[x.t+'|'+x.v, x]));
+  for(const t of incoming) byKey.set(t.t+'|'+t.v, t);
+  p.ticks=[...byKey.values()].sort((a,b)=>a.t-b.t);
+  trim(p);
+}
+function onHistory(m){ const p=panels[m.symbol]; if(!p) return;
+  _mergeTicks(p, (m.ticks||[]).map(d=>({t:d.t,v:d.price,q:d.qty})));
+  if(m.window) p.window=m.window; if(m.symbol===active){ syncRanges(p.window); render(); } updateWatch(m.symbol); }
+function onHistTicks(m){ const p=panels[m.symbol]; if(!p||!m.points) return;
+  _mergeTicks(p, m.points.map(d=>({t:d.t,v:d.price,q:d.qty})));
+  if(m.symbol===active) render(); updateWatch(m.symbol); }
+function onTicks(m){ const p=panels[m.symbol]; if(!p||!m.points) return; for(const d of m.points) p.ticks.push({t:d.t,v:d.price,q:d.qty}); trim(p);
+  // Update forming bar for all timeframes — keeps the current (unclosed) bar live.
+  for(const [tf,tfsec] of Object.entries(TF_SEC)){
+    if(!p.barsByTf[tf]) p.barsByTf[tf]=[];
+    const bars=p.barsByTf[tf];
+    for(const d of m.points){
+      const price=d.price, barT=Math.floor(d.t/tfsec)*tfsec;
+      const last=bars[bars.length-1];
+      if(last && last.t===barT){ last.c=price; if(price>last.h)last.h=price; if(price<last.l)last.l=price; last.v+=d.qty; }
+      else if(!last||barT>last.t){ bars.push({t:barT,o:price,h:price,l:price,c:price,v:d.qty}); }
+    }
+  }
+  if(m.symbol===active){ render(); pushTape(m.points); } updateWatch(m.symbol); }
+function onPackets(m){ document.getElementById("hPkts").textContent = (m.rates && active && m.rates[active]!=null) ? m.rates[active] : (m.total ?? 0); }
+// Resolve which timeframe a bar_type string belongs to for this symbol.
+function tfFromBarType(sym, barType){ for(const tf of Object.keys(TF_SPEC)){ if(barTypeFor(sym,tf)===barType) return tf; } return null; }
+function onBarHistory(m){ const p=panels[m.symbol]; if(!p) return;
+  const tf=tfFromBarType(m.symbol, m.bar_type); if(!tf) return;
+  p.barsByTf[tf]=(m.bars||[]).slice();
+  if(m.symbol===active) render(); }
+function onBars(m){ const p=panels[m.symbol]; if(!p||!m.points) return;
+  const tf=tfFromBarType(m.symbol, m.bar_type); if(!tf) return;
+  if(!p.barsByTf[tf]) p.barsByTf[tf]=[];
+  const bars=p.barsByTf[tf];
+  for(const b of m.points){
+    const last=bars[bars.length-1];
+    if(last && last.t===b.t) bars[bars.length-1]=b;
+    else if(!last || b.t>last.t) bars.push(b);
+    else { const i=bars.findIndex(x=>x.t>=b.t); if(i>=0 && bars[i].t===b.t) bars[i]=b; else if(i>=0) bars.splice(i,0,b); else bars.push(b); }
+  }
+  if(m.symbol===active) render(); }
+
+// ---------- Watchlist ----------
+const watchRows=new Map();
+function addSymbol(sym){
+  if(panels[sym]) { selectSymbol(sym); return; }
+  panels[sym] = { ticks:[], barsByTf:{}, indicators:{}, window:DEFAULT_WINDOW, timeframe:"tick", offset:0 };
+  const row=document.createElement("div"); row.className="watch-row";
+  const sy=sym.split(".");
+  row.innerHTML=`<div style="flex:1;min-width:0"><div class="wr-name">${sy[0]}</div><div class="wr-venue">${sy[1]||""}</div></div><span class="wr-last">–</span>`;
+  row.onclick=()=>selectSymbol(sym);
+  document.getElementById("watchList").appendChild(row);
+  watchRows.set(sym,{row,lastEl:row.querySelector(".wr-last")});
+  sub(sym, DEFAULT_WINDOW);
+  document.getElementById("fCount").textContent=Object.keys(panels).length;
+  if(!active) selectSymbol(sym);
+}
+function selectSymbol(sym){
+  active=sym;
+  for(const [s,r] of watchRows) r.row.classList.toggle("active", s===sym);
+  document.getElementById("mSym").textContent=sym;
+  document.getElementById("chartEmpty").style.display = panels[sym].ticks.length ? "none":"flex";
+  syncRanges(panels[sym].window); syncTfSlider(panels[sym].timeframe); rebuildTape(); render(); updateReadout(panels[sym]);
+}
+function syncTfSlider(tf){ const i=TIMEFRAMES.indexOf(tf); document.getElementById("tfSlider").value = i<0?0:i; document.getElementById("tfVal").textContent = tf; }
+function updateWatch(sym){
+  const p=panels[sym], ref=watchRows.get(sym); if(!p||!ref||!p.ticks.length) return;
+  const last=p.ticks[p.ticks.length-1].v;
+  if(ref.prev!==undefined && ref.prev!==last){ ref.row.classList.remove("flash-up","flash-down"); void ref.row.offsetWidth; ref.row.classList.add(last>ref.prev?"flash-up":"flash-down"); }
+  ref.prev=last; ref.lastEl.textContent=fmt(last);
+  if(sym===active) updateReadout(p);
+}
+function updateReadout(p){
+  if(!p||!p.ticks.length) return;
+  const last=p.ticks[p.ticks.length-1].v, first=p.ticks[0].v, chg=(last-first)/first*100;
+  const cls=chg>=0?"up":"down";
+  const px=document.getElementById("mPx"); px.textContent=fmt(last); px.className="px "+cls;
+  const c=document.getElementById("mChg"); c.textContent=(chg>=0?"+":"")+chg.toFixed(2)+"%"; c.className="chg "+cls;
+  document.getElementById("hTicks").textContent=p.ticks.length;
+  document.getElementById("hLast").textContent=fmtTime(p.ticks[p.ticks.length-1].t);
+}
+
+// ---------- Trade tape ----------
+function rebuildTape(){ const el=document.getElementById("tape"); el.innerHTML=""; const p=panels[active]; if(!p) return; pushTape(p.ticks.slice(-MAX_TAPE).map(t=>({t:t.t,price:t.v,qty:t.q}))); }
+function pushTape(points){
+  const el=document.getElementById("tape"); if(!panels[active]) return;
+  for(const d of points){
+    const row=document.createElement("div"); row.className="tape-row";
+    row.innerHTML=`<span class="tt-t">${fmtTime(d.t,true)}</span><span class="tt-p">${fmt(d.price)}</span><span class="tt-q">${fmtQty(d.qty)}</span>`;
+    el.insertBefore(row, el.firstChild);
+  }
+  while(el.children.length>MAX_TAPE) el.removeChild(el.lastChild);
+}
+
+// ---------- Chart (dependency-free canvas line) ----------
+const AXIS_H = 22;   // pixels reserved at the bottom for the time axis
+let rafPending=false;
+function render(){ if(rafPending) return; rafPending=true; requestAnimationFrame(draw); }
+function showEmpty(on){ document.getElementById("chartEmpty").style.display = on?"flex":"none"; }
+
+let mouse = null; // {x, y} in CSS pixels, or null when outside canvas
+
+function gridY(ctx,w,ch,lo,hi){
+  ctx.strokeStyle=getCss("--line-soft"); ctx.lineWidth=1; ctx.font="10px "+getCss("--mono"); ctx.fillStyle=getCss("--dim-2");
+  for(let i=0;i<=4;i++){ const y=ch*i/4; ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(w,y); ctx.stroke(); const v=hi-(hi-lo)*i/4; ctx.fillText(fmt(v), 4, y+11); }
+}
+
+// Picks a nice tick interval (in seconds) that gives ~5-8 labels across wsec.
+function xTickInterval(wsec){
+  const targets=[5,10,15,30,60,120,300,600,900,1800,3600];
+  for(const t of targets) if(wsec/t<=8) return t;
+  return 3600;
+}
+// Format a time label; show date if tick crosses midnight.
+const _IST = "Asia/Kolkata";
+const _tf_hms=new Intl.DateTimeFormat("en-GB",{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false,timeZone:_IST});
+const _tf_hm =new Intl.DateTimeFormat("en-GB",{hour:"2-digit",minute:"2-digit",hour12:false,timeZone:_IST});
+const _tf_md =new Intl.DateTimeFormat("en-GB",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false,timeZone:_IST});
+function fmtAxisTime(sec, interval){
+  const d=new Date(sec*1000);
+  if(interval<60)  return _tf_hms.format(d);
+  if(interval<3600) return _tf_hm.format(d);
+  return _tf_md.format(d);
+}
+function drawXAxis(ctx,w,ch,t0,wsec){
+  const interval=xTickInterval(wsec);
+  // Align ticks to clean multiples of interval
+  const first=Math.ceil(t0/interval)*interval;
+  const axisY=ch;
+  ctx.font="9.5px "+getCss("--mono"); ctx.fillStyle=getCss("--dim-2");
+  ctx.strokeStyle=getCss("--line-soft"); ctx.lineWidth=1;
+  // Baseline
+  ctx.beginPath(); ctx.moveTo(0,axisY); ctx.lineTo(w,axisY); ctx.stroke();
+  for(let t=first; t<=t0+wsec; t+=interval){
+    const x=(t-t0)/wsec*w;
+    if(x<2||x>w-2) continue;
+    // Subtle vertical grid line through the chart area
+    ctx.save(); ctx.strokeStyle=getCss("--line-soft"); ctx.lineWidth=1; ctx.setLineDash([3,5]);
+    ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,axisY-1); ctx.stroke(); ctx.setLineDash([]); ctx.restore();
+    // Tick mark
+    ctx.beginPath(); ctx.moveTo(x,axisY); ctx.lineTo(x,axisY+4); ctx.stroke();
+    // Label (centered, but clamp to canvas edges)
+    const label=fmtAxisTime(t, interval);
+    const tw=ctx.measureText(label).width;
+    ctx.fillText(label, Math.max(1,Math.min(x-tw/2, w-tw-1)), axisY+AXIS_H-5);
+  }
+}
+
+function drawCrosshair(ctx, w, ch, mx, my, label){
+  ctx.save();
+  ctx.strokeStyle="rgba(154,160,170,0.4)"; ctx.lineWidth=1; ctx.setLineDash([4,4]);
+  ctx.beginPath(); ctx.moveTo(mx,0); ctx.lineTo(mx,ch); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,my); ctx.lineTo(w,my); ctx.stroke();
+  ctx.setLineDash([]);
+  // tooltip box
+  if(label){
+    const pad=8, lh=16, lines=label.split("\n");
+    const bw=lines.reduce((m,l)=>Math.max(m,ctx.measureText(l).width),0)+pad*2;
+    const bh=lines.length*lh+pad*2;
+    let bx=mx+10, by=my-bh/2;
+    if(bx+bw>w) bx=mx-bw-10;
+    by=Math.max(4,Math.min(by,ch-bh-4));
+    ctx.fillStyle="rgba(18,20,25,0.92)"; ctx.strokeStyle="rgba(90,96,107,0.6)"; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.roundRect(bx,by,bw,bh,5); ctx.fill(); ctx.stroke();
+    ctx.fillStyle=getCss("--text"); ctx.font="11px "+getCss("--mono"); ctx.textBaseline="top";
+    lines.forEach((l,i)=>ctx.fillText(l,bx+pad,by+pad+i*lh));
+  }
+  ctx.restore();
+}
+
+function draw(){
+  rafPending=false;
+  const cv=document.getElementById("chart"); const p=panels[active];
+  const dpr=window.devicePixelRatio||1, w=cv.clientWidth, h=cv.clientHeight;
+  cv.width=w*dpr; cv.height=h*dpr; const ctx=cv.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h);
+  if(!p){ showEmpty(true); return; }
+  const actInds=getActiveInds();
+  const isTick=(p.timeframe||"tick")==="tick";
+  document.getElementById("oscPanel").style.display = (actInds.rsi||actInds.rvi) ? "block" : "none";
+  if(isTick) drawLine(ctx,p,w,h,actInds); else drawCandles(ctx,p,w,h,actInds);
+}
+function drawLine(ctx,p,w,h,actInds){
+  if(p.ticks.length<2){ showEmpty(true); return; } showEmpty(false);
+  const ch=h-AXIS_H;
+  const wsec=WINDOW_SEC[p.window]||600, latest=p.ticks[p.ticks.length-1].t, t0=latest-wsec-(p.offset||0);
+  let lo=Infinity, hi=-Infinity;
+  for(const d of p.ticks){ if(d.t<t0) continue; if(d.v<lo)lo=d.v; if(d.v>hi)hi=d.v; }
+  if(lo===Infinity){ return; }
+  const pad=(hi-lo)*0.08||1; lo-=pad; hi+=pad;
+  const X=t=>(t-t0)/wsec*w, Y=v=>ch-(v-lo)/(hi-lo)*ch;
+  gridY(ctx,w,ch,lo,hi);
+  drawXAxis(ctx,w,ch,t0,wsec);
+  const up = p.ticks[p.ticks.length-1].v >= p.ticks[0].v;
+  ctx.strokeStyle=up?getCss("--green"):getCss("--red"); ctx.lineWidth=1.5; ctx.beginPath();
+  let started=false;
+  for(const d of p.ticks){ if(d.t<t0) continue; const x=X(d.t), y=Y(d.v); if(!started){ctx.moveTo(x,y);started=true;} else ctx.lineTo(x,y); }
+  ctx.stroke();
+  // Indicator overlay using 1s bar data (finest available for tick view)
+  if(actInds){
+    const indData=(p.indicators&&p.indicators["1-SECOND-LAST"])||{};
+    const synthBars=Object.keys(indData).map(Number).filter(ts=>ts>=t0).sort().map(ts=>({t:ts}));
+    if(synthBars.length){
+      drawIndicatorOverlay(ctx,indData,w,ch,t0,wsec,synthBars,lo,hi,actInds);
+      if(actInds.rsi||actInds.rvi) drawOscillator(indData,actInds,t0,wsec,synthBars);
+    }
+  }
+  if(mouse){
+    const mx=mouse.x, my=mouse.y;
+    const hoverT=t0+mx/w*wsec;
+    let best=null, bd=Infinity;
+    for(const d of p.ticks){ if(d.t<t0) continue; const dx=Math.abs(d.t-hoverT); if(dx<bd){bd=dx;best=d;} }
+    let label=best?`${fmtAxisTime(best.t,1)}\nprice  ${fmt(best.v)}\nqty    ${fmtQty(best.q)}`:null;
+    if(label&&actInds){
+      const indData=(p.indicators&&p.indicators["1-SECOND-LAST"])||{};
+      const snap=best&&indData[Math.floor(best.t)]||{};
+      const lines=[];
+      if(actInds.sma&&snap.sma!=null)       lines.push(`SMA   ${fmt(snap.sma)}`);
+      if(actInds.ema&&snap.ema!=null)       lines.push(`EMA   ${fmt(snap.ema)}`);
+      if(actInds.vwap&&snap.vwap!=null)     lines.push(`VWAP  ${fmt(snap.vwap)}`);
+      if(actInds.bb&&snap.bb_upper!=null)   lines.push(`BB  ${fmt(snap.bb_upper)} / ${fmt(snap.bb_mid)} / ${fmt(snap.bb_lower)}`);
+      if(actInds.rsi&&snap.rsi!=null)       lines.push(`RSI   ${snap.rsi.toFixed(1)}`);
+      if(actInds.ichi&&snap.ichi_tenkan!=null) lines.push(`T/K  ${fmt(snap.ichi_tenkan)} / ${fmt(snap.ichi_kijun)}`);
+      if(lines.length) label+="\n"+lines.join("\n");
+    }
+    drawCrosshair(ctx,w,ch,mx,my,label);
+  }
+}
+function drawCandles(ctx,p,w,h,actInds){
+  const all = p.barsByTf[p.timeframe]||[];
+  if(all.length<1){ showEmpty(true); return; } showEmpty(false);
+  const ch=h-AXIS_H;
+  const wsec=WINDOW_SEC[p.window]||600;
+  const latest=all[all.length-1].t, t0=latest-wsec-(p.offset||0);
+  const inWin=all.filter(b=>b.t>=t0);
+  if(!inWin.length){ showEmpty(true); return; }
+  let lo=Infinity, hi=-Infinity;
+  for(const b of inWin){ if(b.l<lo)lo=b.l; if(b.h>hi)hi=b.h; }
+  const pad=(hi-lo)*0.08||1; lo-=pad; hi+=pad;
+  const X=t=>(t-t0)/wsec*w, Y=v=>ch-(v-lo)/(hi-lo)*ch;
+  gridY(ctx,w,ch,lo,hi);
+  drawXAxis(ctx,w,ch,t0,wsec);
+  const tfsec=TF_SEC[p.timeframe]||60;
+  const candlesInView = wsec/tfsec;
+  const cw = Math.max(2, Math.min(18, w/candlesInView*0.7));
+  const g=getCss("--green"), r=getCss("--red");
+  for(const b of inWin){
+    const x=X(b.t), col=b.c>=b.o?g:r;
+    ctx.strokeStyle=col; ctx.fillStyle=col;
+    ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(x,Y(b.h)); ctx.lineTo(x,Y(b.l)); ctx.stroke();
+    const yo=Y(b.o), yc=Y(b.c), top=Math.min(yo,yc), bh=Math.max(1,Math.abs(yc-yo));
+    ctx.fillRect(x-cw/2, top, cw, bh);
+  }
+  // Indicator overlays (drawn after candles, before crosshair)
+  if(actInds){ const id=getIndData(p); drawIndicatorOverlay(ctx,id,w,ch,t0,wsec,inWin,lo,hi,actInds);
+    if(actInds.rsi||actInds.rvi) drawOscillator(id,actInds,t0,wsec,inWin); }
+  if(mouse){
+    const mx=mouse.x, my=mouse.y;
+    const hoverT=t0+mx/w*wsec;
+    const hovered=inWin.reduce((best,b)=>Math.abs(b.t+tfsec/2-hoverT)<Math.abs(best.t+tfsec/2-hoverT)?b:best, inWin[0]);
+    const chg=hovered?(hovered.c-hovered.o)/hovered.o*100:0;
+    let label=hovered?`${fmtAxisTime(hovered.t,1)}\nO ${fmt(hovered.o)}  H ${fmt(hovered.h)}\nL ${fmt(hovered.l)}  C ${fmt(hovered.c)}\nvol  ${fmtQty(hovered.v)}  ${chg>=0?"+":""}${chg.toFixed(2)}%`:null;
+    if(label&&actInds){
+      const indData=getIndData(p), snap=(hovered&&indData[hovered.t])||{};
+      const lines=[];
+      if(actInds.sma&&snap.sma!=null)       lines.push(`SMA   ${fmt(snap.sma)}`);
+      if(actInds.ema&&snap.ema!=null)       lines.push(`EMA   ${fmt(snap.ema)}`);
+      if(actInds.vwap&&snap.vwap!=null)     lines.push(`VWAP  ${fmt(snap.vwap)}`);
+      if(actInds.bb&&snap.bb_upper!=null)   lines.push(`BB  ${fmt(snap.bb_upper)} / ${fmt(snap.bb_mid)} / ${fmt(snap.bb_lower)}`);
+      if(actInds.rsi&&snap.rsi!=null)       lines.push(`RSI   ${snap.rsi.toFixed(1)}`);
+      if(actInds.rvi&&snap.rvi!=null)       lines.push(`RVI   ${snap.rvi.toFixed(4)}`);
+      if(actInds.ichi&&snap.ichi_tenkan!=null) lines.push(`T/K  ${fmt(snap.ichi_tenkan)} / ${fmt(snap.ichi_kijun)}`);
+      if(lines.length) label+="\n"+lines.join("\n");
+    }
+    drawCrosshair(ctx,w,ch,mx,my,label);
+  }
+}
+window.addEventListener("resize", render);
+const _cv=document.getElementById("chart");
+_cv.addEventListener("mousemove",e=>{ const r=_cv.getBoundingClientRect(); mouse={x:e.clientX-r.left,y:e.clientY-r.top}; render(); });
+_cv.addEventListener("mouseleave",()=>{ mouse=null; render(); });
+document.getElementById("chart").addEventListener("wheel", e=>{
+  e.preventDefault();
+  if(!active) return;
+  const p=panels[active];
+  const wsec=WINDOW_SEC[p.window]||600;
+  p.offset=Math.max(0, p.offset + wsec*0.15*Math.sign(e.deltaY));
+  // Clamp so we can't scroll past the oldest data
+  if(p.ticks.length){ const span=p.ticks[p.ticks.length-1].t-p.ticks[0].t; p.offset=Math.min(p.offset, Math.max(0,span-wsec)); }
+  document.getElementById("liveBtn").style.display = p.offset>0?"flex":"none";
+  render();
+},{passive:false});
+document.getElementById("liveBtn").addEventListener("click",()=>{
+  if(!active) return;
+  panels[active].offset=0;
+  document.getElementById("liveBtn").style.display="none";
+  render();
+});
+
+// ---------- helpers ----------
+function setLoading(on){
+  document.getElementById("loadingBar").classList.toggle("on", on);
+  document.getElementById("loadingPill").classList.toggle("on", on);
+}
+function getCss(n){ return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+function fmt(v){ if(v==null||isNaN(v)) return "–"; const a=Math.abs(v); if(a>=1000) return v.toFixed(2); if(a>=1) return v.toFixed(4); return v.toPrecision(5); }
+function fmtQty(v){ if(v==null||isNaN(v)) return "–"; if(v>=1e6) return (v/1e6).toFixed(2)+"M"; if(v>=1e3) return (v/1e3).toFixed(2)+"K"; return v.toFixed(3); }
+const tf=new Intl.DateTimeFormat("en-GB",{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false,timeZone:_IST});
+const tfm=new Intl.DateTimeFormat("en-GB",{hour:"2-digit",minute:"2-digit",second:"2-digit",fractionalSecondDigits:3,hour12:false,timeZone:_IST});
+function fmtTime(s,ms){ return (ms?tfm:tf).format(new Date(s*1000)); }
+function fmtBytes(b){ if(b<1024) return b+" B"; const k=1024,u=["KB","MB","GB"]; let i=Math.floor(Math.log(b)/Math.log(k))-1; return (b/Math.pow(k,i+1)).toFixed(1)+" "+u[i]; }
+function fmtPnl(obj){ // {ccy:{realized,unrealized,total}} -> "12.34 USDT"
+  const parts=[]; for(const [ccy,v] of Object.entries(obj||{})) parts.push((v>=0?"+":"")+v.toFixed(2)+" "+ccy); return parts.length?parts.join("  "):"–"; }
+function pnlClass(v){ return v>0?"up":(v<0?"down":""); }
+function fmtMetric(v){
+  if(typeof v==="number"){ if(!isFinite(v)) return String(v); const a=Math.abs(v);
+    return a>=1000?v.toFixed(2):(a>=1?v.toFixed(4):v.toPrecision(5)); }
+  return String(v);
+}
+
+let lastPortfolio = null;
+let activeModal = null;
+
+function onPortfolio(m){
+  lastPortfolio = m;
+  // Overall PnL tiles
+  const byCcy=k=>{ const o={}; for(const [ccy,v] of Object.entries(m.pnl||{})) o[ccy]=v[k]; return o; };
+  const setPnl=(id,k)=>{ const el=document.getElementById(id), o=byCcy(k); el.textContent=fmtPnl(o);
+    const sum=Object.values(o).reduce((a,b)=>a+b,0); el.className="val "+pnlClass(sum); };
+  setPnl("pnlUnreal","unrealized"); setPnl("pnlReal","realized"); setPnl("pnlTotal","total");
+  // Strategy list
+  const el=document.getElementById("stratList");
+  const strats=m.strategies||[];
+  if(!strats.length){
+    el.innerHTML='<div style="color:var(--dim-2);font-size:10.5px;padding:4px 11px;">no active strategies</div>';
+  } else {
+    el.innerHTML=strats.map(sid=>{
+      const metrics=(m.metrics||{})[sid]||{};
+      const px=metrics.last_close!=null?`<span class="sr-px">${fmt(metrics.last_close)}</span>`:"";
+      return `<div class="strat-row" onclick="openStratModal('${sid}')"><span class="sr-name">${sid}</span>${px}</div>`;
+    }).join("");
+  }
+  // Refresh modal if open
+  if(activeModal) _populateModal(activeModal);
+}
+
+function openStratModal(stratId){
+  activeModal=stratId;
+  _populateModal(stratId);
+  document.getElementById("stratModal").style.display="flex";
+}
+
+function closeStratModal(){
+  activeModal=null;
+  document.getElementById("stratModal").style.display="none";
+}
+
+function _populateModal(stratId){
+  const m=lastPortfolio; if(!m) return;
+  const metrics=(m.metrics||{})[stratId]||{};
+  const positions=(m.positions||[]).filter(p=>p.strategy===stratId);
+  document.getElementById("modalStratName").textContent=stratId;
+  document.getElementById("modalDesc").textContent=metrics.description||"No description available.";
+  // Per-strategy PnL: sum from open positions
+  const byCtcy={};
+  for(const p of positions){
+    const ccy=p.ccy||"USDT";
+    if(!byCtcy[ccy]) byCtcy[ccy]={realized:0,unrealized:0};
+    byCtcy[ccy].realized+=p.realized||0;
+    byCtcy[ccy].unrealized+=p.unrealized||0;
+  }
+  const pnlEl=document.getElementById("modalPnl");
+  if(Object.keys(byCtcy).length){
+    pnlEl.innerHTML=Object.entries(byCtcy).map(([ccy,v])=>{
+      const total=v.realized+v.unrealized;
+      return `<div class="tile"><span class="lbl">unrealized</span><span class="val ${pnlClass(v.unrealized)}">${(v.unrealized>=0?"+":"")+v.unrealized.toFixed(2)} ${ccy}</span></div>`+
+             `<div class="tile"><span class="lbl">realized</span><span class="val ${pnlClass(v.realized)}">${(v.realized>=0?"+":"")+v.realized.toFixed(2)} ${ccy}</span></div>`+
+             `<div class="tile"><span class="lbl">total</span><span class="val ${pnlClass(total)}">${(total>=0?"+":"")+total.toFixed(2)} ${ccy}</span></div>`;
+    }).join("");
+  } else {
+    pnlEl.innerHTML='<div style="color:var(--dim-2);font-size:10.5px;padding:2px 0 6px;">no position data</div>';
+  }
+  // Live metrics (exclude description — it's shown in the desc block)
+  const metricsEl=document.getElementById("modalMetrics");
+  const metricEntries=Object.entries(metrics).filter(([k])=>k!=="description");
+  if(metricEntries.length){
+    metricsEl.innerHTML=metricEntries.map(([k,v])=>
+      `<div class="tile"><span class="lbl">${k}</span><span class="val" style="font-size:12px;">${fmtMetric(v)}</span></div>`
+    ).join("");
+  } else {
+    metricsEl.innerHTML='<div style="color:var(--dim-2);font-size:10.5px;padding:2px 0 6px;">no metrics yet</div>';
+  }
+  // Positions
+  const posEl=document.getElementById("modalPositions");
+  if(positions.length){
+    posEl.innerHTML=positions.map(p=>{
+      const sideCls=p.side==="LONG"?"up":(p.side==="SHORT"?"down":"");
+      const upCls=pnlClass(p.unrealized);
+      const sym=p.instrument.split(".")[0];
+      return `<div style="border:1px solid var(--line-soft);border-radius:6px;padding:6px 8px;margin-bottom:6px;font-size:10.5px;">
+        <div style="display:flex;justify-content:space-between;"><b>${sym}</b><span class="${sideCls}">${p.side} ${fmtQty(p.qty)}</span></div>
+        <div style="display:flex;justify-content:space-between;color:var(--dim);margin-top:3px;"><span>avg ${fmt(p.avg_px)}</span><span class="${upCls}">${(p.unrealized>=0?"+":"")+p.unrealized.toFixed(2)} ${p.ccy}</span></div>
+      </div>`;
+    }).join("");
+  } else {
+    posEl.innerHTML='<div style="color:var(--dim-2);font-size:10.5px;padding:2px 0 6px;">no open positions</div>';
+  }
+}
+
+// ---------- indicators ----------
+function _mergeIndicators(p, points) {
+  if (!p.indicators) p.indicators = {};
+  for (const pt of points || []) {
+    const tf = pt.tf; if (!tf) continue;
+    if (!p.indicators[tf]) p.indicators[tf] = {};
+    const snap = {};
+    for (const [k,v] of Object.entries(pt)) { if (k!=="ts"&&k!=="tf") snap[k]=v; }
+    p.indicators[tf][pt.ts] = snap;
+  }
+}
+function onIndicatorHistory(m) { const p=panels[m.symbol]; if(!p) return; _mergeIndicators(p,m.points); if(m.symbol===active) render(); }
+function onIndicators(m)       { const p=panels[m.symbol]; if(!p) return; _mergeIndicators(p,m.points); if(m.symbol===active) render(); }
+
+function getActiveInds() {
+  return {
+    sma:  document.getElementById("cbSma")?.checked  ?? false,
+    ema:  document.getElementById("cbEma")?.checked  ?? false,
+    vwap: document.getElementById("cbVwap")?.checked ?? false,
+    bb:   document.getElementById("cbBb")?.checked   ?? false,
+    ichi: document.getElementById("cbIchi")?.checked ?? false,
+    rsi:  document.getElementById("cbRsi")?.checked  ?? false,
+    rvi:  document.getElementById("cbRvi")?.checked  ?? false,
+  };
+}
+function getIndData(p) {
+  if (!p || p.timeframe==="tick") return {};
+  const spec = TF_SPEC[p.timeframe] ? TF_SPEC[p.timeframe]+"-LAST" : null;
+  return spec ? (p.indicators[spec] || {}) : {};
+}
+
+function drawLine_pts(ctx, pts) {
+  if (!pts.length) return;
+  ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i=1;i<pts.length;i++) ctx.lineTo(pts[i][0],pts[i][1]);
+  ctx.stroke();
+}
+
+function drawIndicatorOverlay(ctx, indData, w, ch, t0, wsec, inWin, lo, hi, actInds) {
+  if (!Object.keys(indData).length) return;
+  const X = t=>(t-t0)/wsec*w, Y = v=>ch-(v-lo)/(hi-lo)*ch;
+
+  // BB cloud area (first — behind candles visually)
+  if (actInds.bb) {
+    const uPts=[], lPts=[];
+    for (const b of inWin) { const s=indData[b.t]; if(!s||s.bb_upper==null) continue; uPts.push([X(b.t),Y(s.bb_upper)]); lPts.push([X(b.t),Y(s.bb_lower)]); }
+    if (uPts.length) {
+      ctx.save();
+      ctx.fillStyle="rgba(79,157,222,0.07)";
+      ctx.beginPath(); ctx.moveTo(...uPts[0]);
+      for(const pt of uPts.slice(1)) ctx.lineTo(...pt);
+      for(const pt of [...lPts].reverse()) ctx.lineTo(...pt);
+      ctx.closePath(); ctx.fill();
+      ctx.strokeStyle="rgba(79,157,222,0.35)"; ctx.lineWidth=1;
+      drawLine_pts(ctx,uPts); drawLine_pts(ctx,lPts);
+      ctx.restore();
+    }
+  }
+
+  // Ichimoku cloud (span_a / span_b shaded area + tenkan/kijun lines)
+  if (actInds.ichi) {
+    const aPts=[], bPts=[];
+    for (const b of inWin) { const s=indData[b.t]; if(!s||s.ichi_span_a==null) continue; aPts.push([X(b.t),Y(s.ichi_span_a)]); bPts.push([X(b.t),Y(s.ichi_span_b)]); }
+    if (aPts.length) {
+      ctx.save();
+      ctx.fillStyle="rgba(144,202,249,0.09)";
+      ctx.beginPath(); ctx.moveTo(...aPts[0]);
+      for(const pt of aPts.slice(1)) ctx.lineTo(...pt);
+      for(const pt of [...bPts].reverse()) ctx.lineTo(...pt);
+      ctx.closePath(); ctx.fill();
+      ctx.strokeStyle="rgba(38,166,154,0.45)"; ctx.lineWidth=1; drawLine_pts(ctx,aPts);
+      ctx.strokeStyle="rgba(239,83,80,0.45)";  ctx.lineWidth=1; drawLine_pts(ctx,bPts);
+      ctx.restore();
+    }
+    [["ichi_tenkan","#ef5350"],["ichi_kijun","#42a5f5"]].forEach(([key,color])=>{
+      const pts=inWin.map(b=>{const s=indData[b.t];return s&&s[key]!=null?[X(b.t),Y(s[key])]:null;}).filter(Boolean);
+      if(pts.length){ctx.save();ctx.strokeStyle=color;ctx.lineWidth=1;drawLine_pts(ctx,pts);ctx.restore();}
+    });
+  }
+
+  // Price-overlay lines: SMA, EMA, VWAP, BB mid
+  [[actInds.sma,"sma","#4f9dde",1.5],[actInds.ema,"ema","#a855f7",1.5],
+   [actInds.vwap,"vwap","#e0a233",1.5],[actInds.bb,"bb_mid","rgba(79,157,222,0.55)",1]]
+  .filter(([on])=>on).forEach(([,key,color,lw])=>{
+    const pts=inWin.map(b=>{const s=indData[b.t];return s&&s[key]!=null?[X(b.t),Y(s[key])]:null;}).filter(Boolean);
+    if(!pts.length) return;
+    ctx.save(); ctx.strokeStyle=color; ctx.lineWidth=lw; drawLine_pts(ctx,pts); ctx.restore();
+  });
+}
+
+function drawOscillator(indData, actInds, t0, wsec, inWin) {
+  const cv=document.getElementById("oscChart"); if(!cv) return;
+  const dpr=window.devicePixelRatio||1, w=cv.clientWidth, h=cv.clientHeight;
+  cv.width=w*dpr; cv.height=h*dpr;
+  const ctx=cv.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h);
+  // Collect values
+  let lo=Infinity, hi=-Infinity, hasRsi=false, hasRvi=false;
+  for (const b of inWin) {
+    const s=indData[b.t]; if(!s) continue;
+    if(actInds.rsi&&s.rsi!=null){lo=Math.min(lo,s.rsi);hi=Math.max(hi,s.rsi);hasRsi=true;}
+    if(actInds.rvi&&s.rvi!=null){lo=Math.min(lo,s.rvi);hi=Math.max(hi,s.rvi);hasRvi=true;}
+  }
+  if(!hasRsi&&!hasRvi) return;
+  if(actInds.rsi){lo=Math.min(lo,0);hi=Math.max(hi,100);}
+  const pad=(hi-lo)*0.08||4; lo-=pad; hi+=pad;
+  const X=t=>(t-t0)/wsec*w, Y=v=>h-(v-lo)/(hi-lo)*h;
+  // Reference bands
+  if(actInds.rsi){
+    ctx.save(); ctx.strokeStyle="rgba(90,96,107,0.3)"; ctx.lineWidth=1; ctx.setLineDash([3,5]);
+    [30,70].forEach(lvl=>{
+      const y=Y(lvl); ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(w,y); ctx.stroke();
+      ctx.fillStyle=getCss("--dim-2"); ctx.font="9px "+getCss("--mono"); ctx.textBaseline="bottom";
+      ctx.fillText(String(lvl),2,y-1);
+    });
+    ctx.setLineDash([]); ctx.restore();
+  }
+  // RSI purple
+  if(hasRsi){
+    const pts=inWin.map(b=>{const s=indData[b.t];return s&&s.rsi!=null?[X(b.t),Y(s.rsi)]:null;}).filter(Boolean);
+    ctx.save(); ctx.strokeStyle="#a855f7"; ctx.lineWidth=1.5; drawLine_pts(ctx,pts); ctx.restore();
+  }
+  // RVI teal
+  if(hasRvi){
+    const pts=inWin.map(b=>{const s=indData[b.t];return s&&s.rvi!=null?[X(b.t),Y(s.rvi)]:null;}).filter(Boolean);
+    ctx.save(); ctx.strokeStyle="#26a69a"; ctx.lineWidth=1.5; drawLine_pts(ctx,pts); ctx.restore();
+  }
+  // Labels
+  ctx.save(); ctx.font="9px "+getCss("--mono"); ctx.fillStyle=getCss("--dim-2"); ctx.textBaseline="top";
+  const lbls=[]; if(hasRsi) lbls.push("RSI(14)"); if(hasRvi) lbls.push("RVI(14)");
+  ctx.fillText(lbls.join("  "),4,2); ctx.restore();
+}
+
+// ---------- ranges / backfill / symbols ----------
+function syncRanges(w){ document.querySelectorAll("#ranges button").forEach(b=>b.classList.toggle("active", b.dataset.w===w)); }
+document.getElementById("ranges").addEventListener("click",e=>{ if(e.target.tagName!=="BUTTON"||!active) return; const w=e.target.dataset.w; panels[active].window=w; syncRanges(w); setWindow(active,w); });
+document.getElementById("tfSlider").addEventListener("input",e=>{
+  const tfv=TIMEFRAMES[+e.target.value]||"tick";
+  document.getElementById("tfVal").textContent=tfv;
+  if(!active) return;
+  panels[active].timeframe=tfv;
+  render();
+});
+document.getElementById("addBtn").addEventListener("click", ()=>{ const v=document.getElementById("addInput").value.trim(); if(v){ addSymbol(v); document.getElementById("addInput").value=""; } });
+document.getElementById("addInput").addEventListener("keydown", e=>{ if(e.key==="Enter") document.getElementById("addBtn").click(); });
+document.getElementById("bfBtn").addEventListener("click", async ()=>{
+  if(!active){ return; }
+  const start=document.getElementById("bfStart").value.trim(), end=document.getElementById("bfEnd").value.trim();
+  const note=document.getElementById("bfNote");
+  const p=panels[active];
+  const tf=p.timeframe;
+  // tick / INTERNAL (1s/5s/15s) -> backfill raw trade ticks; candles are
+  // aggregated client-side from those ticks so no separate bar request needed.
+  // EXTERNAL (1m+) -> backfill Binance klines directly.
+  const useTickBackfill = tf==="tick" || TF_SOURCE[tf]==="INTERNAL";
+  const body = useTickBackfill
+    ? {action:"backfill", instrument_id:active, start, end:end||null}
+    : {action:"backfill", instrument_id:active, bar_type:barTypeFor(active, tf), start, end:end||null};
+  try{
+    const r=await fetch("/api/command",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(body)});
+    if(!r.ok){ note.textContent="command channel error (server returned "+r.status+")."; return; }
+    note.textContent=`backfill sent for ${tf}. fetching…`;
+    setLoading(true);
+    // Re-pull history as data lands so it appears without a manual refresh.
+    // tick -> set_window re-pulls trade history; candle -> refresh_bars re-pulls
+    // the merged hist+live bar history for that bar_type.
+    for(const delay of [1500, 3000, 5000, 7000]){
+      setTimeout(()=>{
+        if(!active || !panels[active] || panels[active].timeframe!==tf) return;
+        if(tf==="tick") setWindow(active, panels[active].window);
+        else refreshBars(active, barTypeFor(active, tf));
+        refreshIndicators(active);
+        note.textContent=`backfill applied (${tf}).`;
+      }, delay);
+    }
+    setTimeout(()=>setLoading(false), 8000);
+  }catch(e){ note.textContent="command channel not available."; setLoading(false); }
+});
+
+async function loadSymbols(){ try{ const r=await fetch("/api/symbols"); const syms=await r.json(); document.getElementById("symList").innerHTML=syms.map(s=>`<option value="${s}">`).join(""); }catch(e){} }
+document.querySelectorAll(".ind-cb input[type=checkbox]").forEach(cb=>cb.addEventListener("change",render));
+
+// ---------- boot ----------
+setInterval(()=>{ document.getElementById("fSession").textContent=Math.floor((Date.now()-sessionStart)/1000)+"s"; document.getElementById("fBytes").textContent=fmtBytes(totalBytes); }, 1000);
+loadSymbols(); connectWS(); connectPackets();
+</script>
+</body>
+</html>
