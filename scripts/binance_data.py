@@ -11,17 +11,30 @@ from nautilus_trader.examples.algorithms.twap import TWAPExecAlgorithm
 from trading.configs.binance_config import config_node, BINANCE_SPOT, BINANCE_FUTURES
 from trading.actors.control_actor import ControlActor, ControlActorConfig
 from trading.strategies.EMACross import EMACross, EMACrossConfig
+from trading.strategies.fixed_positions import FixedNotional, FixedNotionalConfig
 
 node = TradingNode(config_node)
 
-# BTC perpetual on the Futures testnet (DEMO) — execution venue.
-BTC = InstrumentId.from_str(f"BTCUSDT-PERP.{BINANCE_FUTURES}")
-# Tick data → INTERNAL tick-aggregation bars (built locally from trades).
-# 100-TICK = one bar per 100 trades. Drop to 1-TICK for a bar per trade (noisier).
-BTC_BAR = BarType.from_str(f"BTCUSDT-PERP.{BINANCE_FUTURES}-10-TICK-LAST-INTERNAL")
+# Top 20 most popular USDT-margined perpetual futures on Binance by open interest.
+_PERP_SYMS = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+    "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "SUIUSDT",
+    "DOTUSDT", "NEARUSDT", "APTUSDT", "LTCUSDT", "UNIUSDT",
+    "ATOMUSDT", "INJUSDT", "AAVEUSDT", "ARBUSDT", "MNTUSDT",
+]
+PERP_INSTRUMENTS = tuple(
+    InstrumentId.from_str(f"{sym}-PERP.{BINANCE_FUTURES}")
+    for sym in _PERP_SYMS
+)
 
 node.trader.add_actor(ControlActor(ControlActorConfig()))
+node.trader.add_strategy(FixedNotional(FixedNotionalConfig(
+    instrument_ids=PERP_INSTRUMENTS,
+    target_usd=Decimal("2000"),
+    rebalance_threshold=0.001,
+)))
 #exec_algorithm = TWAPExecAlgorithm()
+"""
 node.trader.add_strategy(EMACross(EMACrossConfig(
     instrument_id=BTC,
     bar_type=BTC_BAR,
@@ -29,6 +42,7 @@ node.trader.add_strategy(EMACross(EMACrossConfig(
     fast_ema_period=5,
     slow_ema_period=20,
 )))
+"""
 #node.trader.add_exec_algorithm(exec_algorithm)
 
 
@@ -41,5 +55,7 @@ node.build()
 if __name__ == "__main__":
     try:
         node.run()
+    except KeyboardInterrupt:
+        node.stop()
     finally:
         node.dispose()

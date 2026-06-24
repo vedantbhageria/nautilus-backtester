@@ -46,6 +46,7 @@ WINDOWS = {"2m", "10m", "30m", "1h", "4h", "1d", "3d"}
 TRADES_INFIX = ":data.trades."
 COMMAND_STREAM = "dashboard:commands"   # ControlActor polls this (see control_actor.py)
 INDICATORS_PREFIX = "dashboard:indicators:"
+ORDER_EVENTS_KEY = "dashboard:order_events"
 
 app = FastAPI()
 # socket_timeout=None: blocking XREAD must not be killed by a read timeout when
@@ -517,11 +518,42 @@ async def _portfolio_frame() -> dict | None:
     return {"type": "portfolio", **snap, "metrics": metrics}
 
 
+async def _tail_order_events() -> None:
+    cursor = "$"
+    while True:
+        try:
+            results = await r.xread({ORDER_EVENTS_KEY: cursor}, count=100, block=1000)
+            if not results:
+                continue
+            _, entries = results[0]
+            if not entries:
+                continue
+            cursor = entries[-1][0]
+            for _id, fields in entries:
+                frame = {
+                    "type": "order_event",
+                    "strategy": fields.get("strategy", ""),
+                    "instrument": fields.get("instrument", ""),
+                    "status": fields.get("status", ""),
+                    "side": fields.get("side", ""),
+                    "qty": fields.get("qty", ""),
+                    "ts": float(fields.get("ts", 0)),
+                }
+                for ws in list(clients):
+                    await _safe_send(ws, frame)
+        except RedisError:
+            await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            await asyncio.sleep(0.5)
+
+
 async def _portfolio_loop() -> None:
     # Broadcast the portfolio frame to all clients, only when it changes.
     last = None
     while True:
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.25)
         if not clients:
             continue
         frame = await _portfolio_frame()
@@ -539,6 +571,7 @@ async def _portfolio_loop() -> None:
 async def _startup() -> None:
     asyncio.create_task(_packet_loop())
     asyncio.create_task(_portfolio_loop())
+    asyncio.create_task(_tail_order_events())
 
 
 # ── WebSocket: market data ──────────────────────────────────────────────────

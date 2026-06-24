@@ -108,6 +108,11 @@ class ControlActor(Actor):
                     "unrealized": up.as_double() if up is not None else 0.0,
                     "ccy": up.currency.code if up is not None else "",
                 })
+            prices = {}
+            for p in self.cache.positions_open():
+                tick = self.cache.trade_tick(p.instrument_id)
+                if tick is not None:
+                    prices[str(p.instrument_id)] = float(tick.price)
             names = {str(s) for s in self.cache.strategy_ids()}
             try:
                 names |= set(self._redis.smembers(STRATEGY_SET) or [])
@@ -117,6 +122,7 @@ class ControlActor(Actor):
                 "ts": int(self.clock.timestamp_ns() // 1_000_000),
                 "strategies": sorted(names),
                 "positions": positions,
+                "prices": prices,
                 "pnl": pnl,
             }
             self._redis.set(PORTFOLIO_KEY, json.dumps(snap))

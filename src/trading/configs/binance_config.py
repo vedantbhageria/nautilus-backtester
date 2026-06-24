@@ -100,10 +100,19 @@ config_node = TradingNodeConfig(
             ),
         ),
     },
-    exec_clients={},
+    exec_clients={
+        BINANCE_FUTURES: BinanceExecClientConfig(
+            venue=Venue(BINANCE_FUTURES),
+            account_type=BinanceAccountType.USDT_FUTURES,
+            environment=BinanceEnvironment.DEMO,
+            instrument_provider=BinanceInstrumentProviderConfig(
+                load_all=True,
+            ),
+        ),
+    },
     timeout_connection=30.0,
     timeout_reconciliation=10.0,
     timeout_portfolio=10.0,
-    timeout_disconnection=10.0,
-    timeout_post_stop=5.0,
+    timeout_disconnection=30.0,
+    timeout_post_stop=30.0,
 )

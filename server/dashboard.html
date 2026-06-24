@@ -83,13 +83,31 @@
   .ind-cb:hover{ color:var(--text); }
   .ind-cb input[type=checkbox]{ width:11px; height:11px; cursor:pointer; accent-color:var(--amber); margin:0; }
   /* Strategy list */
-  .strat-row{ display:flex; align-items:center; justify-content:space-between; padding:7px 10px; margin:0 11px 5px; background:var(--panel-2); border:1px solid var(--line-soft); border-radius:7px; cursor:pointer; transition:.12s; }
+  .strat-row{ display:flex; align-items:center; justify-content:space-between; padding:7px 10px; margin:0 11px 5px; background:var(--panel-2); border:1px solid var(--line-soft); border-radius:7px; cursor:pointer; transition:border-color .3s; }
   .strat-row:hover{ border-color:var(--amber); }
-  .strat-row .sr-name{ font-size:11px; font-weight:700; color:var(--text); }
+  .strat-row.flash-fill{ border-color:var(--green) !important; }
+  .strat-row.flash-reject{ border-color:var(--red) !important; }
+  .strat-row .sr-name{ font-size:11px; font-weight:700; color:var(--text); flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .strat-row .sr-px{ font-size:11px; font-weight:700; font-variant-numeric:tabular-nums; color:var(--dim); }
+  .sr-pending{ font-size:9px; font-weight:700; color:var(--amber); white-space:nowrap; margin-left:6px; }
   /* Strategy modal */
-  .strat-modal-backdrop{ position:fixed; inset:0; z-index:200; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; }
-  .strat-modal-card{ background:var(--panel); border:1px solid var(--line); border-radius:10px; width:420px; max-height:78vh; overflow-y:auto; padding:18px 20px 20px; position:relative; }
+  .strat-modal-backdrop{ position:fixed; inset:0; z-index:200; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; gap:12px; }
+  .strat-modal-card{ background:var(--panel); border:1px solid var(--line); border-radius:10px; width:420px; max-height:78vh; overflow-y:auto; padding:18px 20px 20px; position:relative; flex-shrink:0; }
+  /* Orders side panel */
+  .orders-panel{ background:var(--panel); border:1px solid var(--line); border-radius:10px; width:300px; max-height:78vh; display:flex; flex-direction:column; flex-shrink:0; overflow:hidden; }
+  .orders-panel-head{ padding:12px 14px 8px; font-size:9px; letter-spacing:.12em; text-transform:uppercase; color:var(--dim-2); border-bottom:1px solid var(--line-soft); flex-shrink:0; }
+  .orders-list{ flex:1; overflow-y:auto; padding:6px 8px; }
+  .orders-list::-webkit-scrollbar{ width:4px; } .orders-list::-webkit-scrollbar-thumb{ background:var(--line); border-radius:2px; }
+  .order-row{ display:flex; flex-direction:column; gap:2px; padding:5px 7px; border-radius:6px; margin-bottom:4px; border:1px solid var(--line-soft); font-size:10.5px; transition:border-color .3s,background .3s; }
+  .order-row.status-pending{ border-color:var(--amber); background:rgba(224,162,51,0.05); }
+  .order-row.status-filled{ border-color:var(--green); background:rgba(38,166,154,0.08); }
+  .order-row.status-rejected{ border-color:var(--red); background:rgba(239,83,80,0.08); }
+  .order-row.status-canceled{ border-color:var(--dim-2); }
+  .order-row .or-top{ display:flex; justify-content:space-between; align-items:center; }
+  .order-row .or-sym{ font-weight:700; }
+  .order-row .or-status{ font-size:9px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; }
+  .or-status.pending{ color:var(--amber); } .or-status.filled{ color:var(--green); } .or-status.rejected{ color:var(--red); } .or-status.canceled{ color:var(--dim-2); }
+  .order-row .or-detail{ color:var(--dim); font-size:10px; }
   .strat-modal-card::-webkit-scrollbar{ width:4px; } .strat-modal-card::-webkit-scrollbar-thumb{ background:var(--line); border-radius:2px; }
   .strat-modal-hd{ display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
   .strat-modal-hd .sm-name{ font-size:14px; font-weight:700; color:var(--amber); }
@@ -229,6 +247,10 @@
 
 <!-- Strategy drill-down modal -->
 <div id="stratModal" class="strat-modal-backdrop" style="display:none;" onclick="if(event.target===this)closeStratModal()">
+  <div class="orders-panel" id="ordersPanel">
+    <div class="orders-panel-head">Order History</div>
+    <div class="orders-list" id="ordersList"></div>
+  </div>
   <div class="strat-modal-card">
     <div class="strat-modal-hd">
       <span class="sm-name" id="modalStratName"></span>
@@ -281,6 +303,7 @@ function connectWS(){
     else if(m.type==="bar_history") onBarHistory(m);
     else if(m.type==="bars") onBars(m);
     else if(m.type==="portfolio") onPortfolio(m);
+    else if(m.type==="order_event") onOrderEvent(m);
     else if(m.type==="indicator_history") onIndicatorHistory(m);
     else if(m.type==="indicators") onIndicators(m);
   };
@@ -630,6 +653,9 @@ function fmtMetric(v){
 
 let lastPortfolio = null;
 let activeModal = null;
+const orderState = {};   // stratId -> {pending: N}
+const orderHistory = {}; // stratId -> [{instrument, side, qty, status, ts}]
+const MAX_ORDER_HISTORY = 100;
 
 function onPortfolio(m){
   lastPortfolio = m;
@@ -647,16 +673,64 @@ function onPortfolio(m){
     el.innerHTML=strats.map(sid=>{
       const metrics=(m.metrics||{})[sid]||{};
       const px=metrics.last_close!=null?`<span class="sr-px">${fmt(metrics.last_close)}</span>`:"";
-      return `<div class="strat-row" onclick="openStratModal('${sid}')"><span class="sr-name">${sid}</span>${px}</div>`;
+      const safe=sid.replace(/[^a-zA-Z0-9]/g,"_");
+      const n=(orderState[sid]||{}).pending||0;
+      const badge=`<span class="sr-pending" id="srp-${safe}">${n>0?`● ${n} pending`:""}</span>`;
+      return `<div class="strat-row" id="sr-${safe}" onclick="openStratModal('${sid}')"><span class="sr-name">${sid}</span>${badge}${px}</div>`;
     }).join("");
   }
   // Refresh modal if open
   if(activeModal) _populateModal(activeModal);
 }
 
+function onOrderEvent(m){
+  const sid=m.strategy;
+  if(!orderState[sid]) orderState[sid]={pending:0};
+  if(!orderHistory[sid]) orderHistory[sid]=[];
+  const state=orderState[sid];
+  const hist=orderHistory[sid];
+
+  if(m.status==="submitted"){
+    state.pending=Math.max(0,state.pending+1);
+    hist.unshift({instrument:m.instrument,side:m.side,qty:m.qty,status:"pending",ts:m.ts});
+    if(hist.length>MAX_ORDER_HISTORY) hist.length=MAX_ORDER_HISTORY;
+  } else {
+    state.pending=Math.max(0,state.pending-1);
+    // Update the most recent matching pending entry
+    const entry=hist.find(o=>o.instrument===m.instrument&&o.status==="pending");
+    if(entry) entry.status=m.status;
+  }
+
+  const safe=sid.replace(/[^a-zA-Z0-9]/g,"_");
+  const badge=document.getElementById("srp-"+safe);
+  if(badge) badge.textContent=state.pending>0?`● ${state.pending} pending`:"";
+  const row=document.getElementById("sr-"+safe);
+  if(row){
+    const cls=m.status==="filled"?"flash-fill":m.status==="rejected"?"flash-reject":null;
+    if(cls){ row.classList.add(cls); setTimeout(()=>row.classList.remove(cls),800); }
+  }
+  if(activeModal===sid) _renderOrdersList(sid);
+}
+
+function _renderOrdersList(sid){
+  const el=document.getElementById("ordersList"); if(!el) return;
+  const hist=orderHistory[sid]||[];
+  if(!hist.length){ el.innerHTML='<div style="color:var(--dim-2);font-size:10.5px;padding:6px 4px;">no orders yet</div>'; return; }
+  el.innerHTML=hist.map(o=>{
+    const sym=o.instrument.split(".")[0];
+    const sideCls=o.side==="BUY"?"up":(o.side==="SELL"?"down":"");
+    const t=o.ts?new Date(o.ts*1000).toLocaleTimeString("en-GB",{hour12:false}):"";
+    return `<div class="order-row status-${o.status}">
+      <div class="or-top"><span class="or-sym">${sym}</span><span class="or-status ${o.status}">${o.status}</span></div>
+      <div class="or-detail"><span class="${sideCls}">${o.side||"–"}</span> ${o.qty||"–"} &nbsp;·&nbsp; ${t}</div>
+    </div>`;
+  }).join("");
+}
+
 function openStratModal(stratId){
   activeModal=stratId;
   _populateModal(stratId);
+  _renderOrdersList(stratId);
   document.getElementById("stratModal").style.display="flex";
 }
 
@@ -707,9 +781,14 @@ function _populateModal(stratId){
       const sideCls=p.side==="LONG"?"up":(p.side==="SHORT"?"down":"");
       const upCls=pnlClass(p.unrealized);
       const sym=p.instrument.split(".")[0];
+      const symPanel=panels[p.instrument];
+      const livePx=symPanel&&symPanel.ticks.length?symPanel.ticks[symPanel.ticks.length-1].v:null;
+      const lastPx=livePx??((lastPortfolio.prices||{})[p.instrument]??null);
+      const posVal=lastPx!=null?p.qty*lastPx:null;
       return `<div style="border:1px solid var(--line-soft);border-radius:6px;padding:6px 8px;margin-bottom:6px;font-size:10.5px;">
         <div style="display:flex;justify-content:space-between;"><b>${sym}</b><span class="${sideCls}">${p.side} ${fmtQty(p.qty)}</span></div>
         <div style="display:flex;justify-content:space-between;color:var(--dim);margin-top:3px;"><span>avg ${fmt(p.avg_px)}</span><span class="${upCls}">${(p.unrealized>=0?"+":"")+p.unrealized.toFixed(2)} ${p.ccy}</span></div>
+        <div style="display:flex;justify-content:space-between;color:var(--dim);margin-top:2px;"><span>value</span><span style="color:var(--text)">${posVal!=null?"$"+posVal.toFixed(2):"–"}</span></div>
       </div>`;
     }).join("");
   } else {
