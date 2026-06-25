@@ -1,12 +1,8 @@
 import json
 import os
-import time
 from datetime import datetime, timedelta, timezone
 
-_TICK_CHUNK_SECS = 3600  # 1 hour per request — Binance aggTrades window limit
 _IST = timezone(timedelta(hours=5, minutes=30))
-_INTERNAL_SPECS = [("1-SECOND-LAST", 1), ("5-SECOND-LAST", 5), ("15-SECOND-LAST", 15)]
-_TICK_QUIET_SECS = 2.0  # flush a buffer once no new historical ticks arrive for this long
 
 from nautilus_trader.common.actor import Actor
 from nautilus_trader.config import ActorConfig
@@ -18,10 +14,9 @@ from nautilus_trader.indicators import (
     SimpleMovingAverage,
     VolumeWeightedAveragePrice,
 )
-from nautilus_trader.model.data import Bar, BarType, TradeTick
+from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import AggregationSource, BarAggregation
 from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.objects import Price, Quantity
 
 COMMAND_STREAM = "dashboard:commands"
 PORTFOLIO_KEY = "dashboard:portfolio"
@@ -40,14 +35,6 @@ class ControlActor(Actor):
         super().__init__(config)
         self._redis = None
         self._cmd_cursor = "$"
-        # Per-instrument accumulation for backfill aggregation. Ticks for a
-        # request arrive in multiple batches with unpredictable gaps, so we
-        # accumulate the whole backfill and re-aggregate the full set once the
-        # stream goes quiet — a late flush re-publishes complete bars that
-        # supersede any partial bars from an earlier (premature) flush.
-        self._tick_buffer: dict[str, list] = {}      # instrument_id -> all ticks this backfill
-        self._tick_last_seen: dict[str, float] = {}  # instrument_id -> monotonic time of last tick
-        self._tick_flushed: dict[str, int] = {}      # instrument_id -> tick count at last flush
         self._indicators: dict[str, dict] = {}       # "{instrument_id}:{spec}" -> indicator instances
 
     def on_start(self) -> None:
@@ -67,12 +54,6 @@ class ControlActor(Actor):
         except Exception as e:
             self._redis = None
             self.log.warning(f"Command channel unavailable: {e}")
-        # Periodic flush of debounced historical-tick buffers.
-        self.clock.set_timer(
-            name="flush_hist_ticks",
-            interval=timedelta(milliseconds=500),
-            callback=self._flush_quiet_buffers,
-        )
         # Periodic portfolio/PnL/positions snapshot for the dashboard.
         if self._redis is not None:
             self.clock.set_timer(
@@ -257,7 +238,11 @@ class ControlActor(Actor):
             self.log.warning(f"Backfill ignored ({bar_type}): bad start={start!r}")
             return
         if bar_type.spec.aggregation in (BarAggregation.SECOND, BarAggregation.MILLISECOND):
-            self.log.warning(f"Backfill skipped ({bar_type}): Binance has no sub-minute klines")
+            # Sub-minute; Binance has no klines, so let Nautilus download the
+            # trades and aggregate them internally into the requested bars.
+            int_bt = BarType(bar_type.instrument_id, bar_type.spec, AggregationSource.INTERNAL)
+            self.log.info(f"Backfill internal bars {int_bt} [{start_dt} -> {end_dt}]", color=4)
+            self.request_aggregated_bars([int_bt], start=start_dt, end=end_dt, update_catalog=False)
             return
         ext_bt = BarType(bar_type.instrument_id, bar_type.spec, AggregationSource.EXTERNAL)
         self.log.info(f"Backfill bars {ext_bt} [{start_dt} -> {end_dt}]", color=4)
@@ -270,120 +255,18 @@ class ControlActor(Actor):
             self.log.warning(f"Tick backfill ignored ({instrument_id}): bad start={start!r}")
             return
         self.log.info(f"Tick backfill {instrument_id} [{start_dt} -> {end_dt}]", color=4)
-        # Fresh accumulation for this backfill session.
-        key = str(instrument_id)
-        self._tick_buffer.pop(key, None)
-        self._tick_last_seen.pop(key, None)
-        self._tick_flushed.pop(key, None)
-        chunk_ns = int(_TICK_CHUNK_SECS * 1e9)
-        cur, n = self._ns(start_dt), 0
-        end_ns = self._ns(end_dt)
-        while cur < end_ns:
-            chunk_end = min(cur + chunk_ns, end_ns)
-            self.request_trade_ticks(
-                instrument_id, start=self._dt(cur), end=self._dt(chunk_end), update_catalog=False,
-            )
-            cur = chunk_end
-            n += 1
-        self.log.info(f"Tick request: {n} chunk(s) of ≤{_TICK_CHUNK_SECS // 3600}h", color=4)
+        self.request_trade_ticks(instrument_id, start=start_dt, end=end_dt, update_catalog=False)
 
     def on_historical_data(self, data) -> None:
-        # Historical TradeTicks (from request_trade_ticks backfill): buffer per
-        # instrument; the flush timer aggregates once the stream goes quiet.
-        if isinstance(data, TradeTick):
-            ticks = [data]
-        elif isinstance(data, list) and data and isinstance(data[0], TradeTick):
-            ticks = data
-        else:
-            ticks = None
-        if ticks is not None:
-            key = str(ticks[0].instrument_id)
-            self._tick_buffer.setdefault(key, []).extend(ticks)
-            self._tick_last_seen[key] = time.monotonic()
-            return
-        # Historical Bars (from request_bars / EXTERNAL backfill): feed indicators.
+        # Nautilus streams aggregated bars natively to historical.data.bars, which
+        # the dashboard now tails continuously — so no republish is needed here.
+        # We only feed the indicator overlays (a custom dashboard feature).
         if isinstance(data, Bar):
             self._feed_and_publish_indicator(data)
         elif isinstance(data, list) and data and isinstance(data[0], Bar):
             for bar in data:
                 self._feed_and_publish_indicator(bar)
 
-    def _flush_quiet_buffers(self, event) -> None:
-        # Re-aggregate the FULL accumulated buffer (not just new ticks) once a
-        # backfill goes quiet. Re-publishing complete bars supersedes any partial
-        # bars from an earlier premature flush. The dirty check (count changed)
-        # prevents re-publishing the same complete set every tick.
-        now = time.monotonic()
-        for key, last in list(self._tick_last_seen.items()):
-            if now - last < _TICK_QUIET_SECS:
-                continue
-            ticks = self._tick_buffer.get(key, [])
-            if len(ticks) == self._tick_flushed.get(key, 0):
-                continue  # nothing new since last flush
-            self._tick_flushed[key] = len(ticks)
-            if ticks:
-                self._aggregate_and_publish(ticks)
-
-    def _aggregate_and_publish(self, ticks: list) -> None:
-        instrument_id = ticks[0].instrument_id
-        instrument = self.cache.instrument(instrument_id)
-        if instrument is None:
-            return
-        pp, sp = instrument.price_precision, instrument.size_precision
-        for spec, tfsec in _INTERNAL_SPECS:
-            bt = BarType.from_str(f"{instrument_id}-{spec}-INTERNAL")
-            buckets: dict[int, dict] = {}
-            for tick in ticks:
-                ts_s = tick.ts_event // 1_000_000_000
-                bucket_ns = (ts_s // tfsec) * tfsec * 1_000_000_000
-                price = float(tick.price)
-                size = float(tick.size)
-                if bucket_ns not in buckets:
-                    buckets[bucket_ns] = {"o": price, "h": price, "l": price, "c": price, "v": size}
-                else:
-                    b = buckets[bucket_ns]
-                    b["c"] = price
-                    b["v"] += size
-                    if price > b["h"]: b["h"] = price
-                    if price < b["l"]: b["l"] = price
-            if not buckets:
-                continue
-            # Forward-fill empty periods with a flat 0-volume bar at the prior
-            # close, matching Nautilus' live INTERNAL aggregation (which emits a
-            # bar every period regardless of trade activity).
-            step_ns = tfsec * 1_000_000_000
-            first_ns, last_ns = min(buckets), max(buckets)
-            n_pub = 0
-            prev_close = buckets[first_ns]["o"]
-            ts_ns = first_ns
-            while ts_ns <= last_ns:
-                b = buckets.get(ts_ns)
-                if b is None:
-                    b = {"o": prev_close, "h": prev_close, "l": prev_close, "c": prev_close, "v": 0.0}
-                prev_close = b["c"]
-                bar = Bar(
-                    bar_type=bt,
-                    open=Price(b["o"], pp),
-                    high=Price(b["h"], pp),
-                    low=Price(b["l"], pp),
-                    close=Price(b["c"], pp),
-                    volume=Quantity(b["v"], sp),
-                    ts_event=ts_ns,
-                    ts_init=ts_ns,
-                )
-                self._msgbus.publish(topic=f"data.bars.{bt}", msg=bar)
-                n_pub += 1
-                ts_ns += step_ns
-            self.log.info(f"Published {n_pub} {spec} bars ({len(buckets)} with trades) for {instrument_id}", color=4)
-
-
-    @staticmethod
-    def _ns(dt: datetime) -> int:
-        return int(dt.timestamp() * 1e9)
-
-    @staticmethod
-    def _dt(ns: int) -> datetime:
-        return datetime.fromtimestamp(ns / 1e9, tz=timezone.utc)
 
     @staticmethod
     def _parse_ts(ts) -> datetime | None:

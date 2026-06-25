@@ -348,17 +348,8 @@ function onHistTicks(m){ const p=panels[m.symbol]; if(!p||!m.points) return;
   _mergeTicks(p, m.points.map(d=>({t:d.t,v:d.price,q:d.qty})));
   if(m.symbol===active) render(); updateWatch(m.symbol); }
 function onTicks(m){ const p=panels[m.symbol]; if(!p||!m.points) return; for(const d of m.points) p.ticks.push({t:d.t,v:d.price,q:d.qty}); trim(p);
-  // Update forming bar for all timeframes — keeps the current (unclosed) bar live.
-  for(const [tf,tfsec] of Object.entries(TF_SEC)){
-    if(!p.barsByTf[tf]) p.barsByTf[tf]=[];
-    const bars=p.barsByTf[tf];
-    for(const d of m.points){
-      const price=d.price, barT=Math.floor(d.t/tfsec)*tfsec;
-      const last=bars[bars.length-1];
-      if(last && last.t===barT){ last.c=price; if(price>last.h)last.h=price; if(price<last.l)last.l=price; last.v+=d.qty; }
-      else if(!last||barT>last.t){ bars.push({t:barT,o:price,h:price,l:price,c:price,v:d.qty}); }
-    }
-  }
+  // Sub-minute candles come from the server's INTERNAL bars (onBars), not from
+  // client-side tick aggregation — ticks only drive the raw "tick" line + tape.
   if(m.symbol===active){ render(); pushTape(m.points); } updateWatch(m.symbol); }
 function onPackets(m){ document.getElementById("hPkts").textContent = (m.rates && active && m.rates[active]!=null) ? m.rates[active] : (m.total ?? 0); }
 // Resolve which timeframe a bar_type string belongs to for this symbol.
@@ -995,10 +986,10 @@ document.getElementById("bfBtn").addEventListener("click", async ()=>{
   const note=document.getElementById("bfNote");
   const p=panels[active];
   const tf=p.timeframe;
-  // tick / INTERNAL (1s/5s/15s) -> backfill raw trade ticks; candles are
-  // aggregated client-side from those ticks so no separate bar request needed.
-  // EXTERNAL (1m+) -> backfill Binance klines directly.
-  const useTickBackfill = tf==="tick" || TF_SOURCE[tf]==="INTERNAL";
+  // Each timeframe is an independent request: tick -> raw trade ticks;
+  // 1s/5s/15s -> INTERNAL bars (Nautilus aggregates server-side); 1m+ -> Binance
+  // klines. A bar backfill no longer also pulls ticks.
+  const useTickBackfill = tf==="tick";
   const body = useTickBackfill
     ? {action:"backfill", instrument_id:active, start, end:end||null}
     : {action:"backfill", instrument_id:active, bar_type:barTypeFor(active, tf), start, end:end||null};

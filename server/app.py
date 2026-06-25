@@ -195,6 +195,7 @@ packet_clients: set[WebSocket] = set()
 # Bars: keyed by bar_type string (per symbol+timeframe).
 bar_clients: dict[str, set[WebSocket]] = defaultdict(set)
 bar_tail_tasks: dict[str, asyncio.Task] = {}
+hist_bar_tail_tasks: dict[str, asyncio.Task] = {}   # historical.data.bars tail per bar_type
 client_bars: dict[WebSocket, set[str]] = defaultdict(set)   # ws -> bar_types it watches
 
 # Historical trade ticks (backfill arrivals) — tailed separately so they stream
@@ -391,9 +392,55 @@ async def _tail_bars(symbol: str, bar_type: str) -> None:
         bar_tail_tasks.pop(bar_type, None)
 
 
+async def _tail_hist_bars(symbol: str, bar_type: str) -> None:
+    # Continuously tail historical.data.bars.{bar_type} so backfilled candles
+    # stream to the browser as they land — mirrors _tail_hist_symbol for trades.
+    # Nautilus publishes aggregated bars here natively (INTERNAL and EXTERNAL),
+    # so no actor-side republish is needed. Start at "0-0" to catch backfill
+    # entries written before this tail found the key; the dashboard dedups bars
+    # by timestamp, so overlap with bar_history is harmless.
+    key = None
+    cursor = "0-0"
+    try:
+        while bar_clients.get(bar_type):
+            if key is None:
+                key = await find_hist_bar_key(bar_type)
+                if key is None:
+                    await asyncio.sleep(2.0)
+                    continue
+            try:
+                results = await r.xread({key: cursor}, count=XREAD_COUNT, block=XREAD_BLOCK_MS)
+            except RedisError:
+                await asyncio.sleep(0.5)
+                continue
+            if not results:
+                continue
+            _, entries = results[0]
+            if not entries:
+                continue
+            cursor = entries[-1][0]
+            points = []
+            for _id, fields in entries:
+                pv = _payload_value(fields)
+                bar = _bar_from_payload(pv) if pv else None
+                if bar:
+                    points.append(bar)
+            if not points:
+                continue
+            frame = {"type": "bars", "symbol": symbol, "bar_type": bar_type, "points": points}
+            for ws in list(bar_clients.get(bar_type, ())):
+                await _safe_send(ws, frame)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        hist_bar_tail_tasks.pop(bar_type, None)
+
+
 def _ensure_bar_tail(symbol: str, bar_type: str) -> None:
     if bar_type not in bar_tail_tasks or bar_tail_tasks[bar_type].done():
         bar_tail_tasks[bar_type] = asyncio.create_task(_tail_bars(symbol, bar_type))
+    if bar_type not in hist_bar_tail_tasks or hist_bar_tail_tasks[bar_type].done():
+        hist_bar_tail_tasks[bar_type] = asyncio.create_task(_tail_hist_bars(symbol, bar_type))
 
 
 async def _send_bar_history(ws: WebSocket, symbol: str, bar_type: str) -> None:
