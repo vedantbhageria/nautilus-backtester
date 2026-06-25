@@ -12,7 +12,7 @@ from nautilus_trader.trading.strategy import Strategy
 STRATEGY_SET = "dashboard:strategies"
 METRICS_PREFIX = "dashboard:metrics:"
 
-_MIN_ORDER_USD = 5
+_MIN_ORDER_USD = 3
 _REBALANCE_COOLDOWN = 5.0
 
 
@@ -29,11 +29,14 @@ class FixedNotional(Strategy):
         self._pending: set[str] = set()
         self._last_rebalance: dict[str, float] = {}
         self._redis = None
+        # Trading gate, flipped by the controller (binance_data.py). The node
+        # auto-starts every strategy on boot; while disarmed the strategy
+        # registers with the dashboard but does NOT subscribe or trade.
+        self._active = False
 
     def on_start(self) -> None:
-        for iid in self.config.instrument_ids:
-            self.subscribe_trade_ticks(iid)
-
+        # Always register with the dashboard so the strategy is visible (with
+        # its description) even while stopped.
         try:
             import redis as _redis
             self._redis = _redis.Redis.from_url(
@@ -45,7 +48,17 @@ class FixedNotional(Strategy):
             self._redis = None
             self.log.warning(f"Dashboard registry unavailable: {e}")
 
+        # Only subscribe to market data (and thus start trading) when armed.
+        if self._active:
+            for iid in self.config.instrument_ids:
+                self.subscribe_trade_ticks(iid)
+            self.log.info(f"Armed: subscribed to {len(self.config.instrument_ids)} instruments")
+        else:
+            self.log.info("Disarmed on start — idle until armed by controller")
+
     def on_trade_tick(self, tick: TradeTick) -> None:
+        if not self._active:
+            return
         self._maybe_rebalance(tick.instrument_id)
 
     def _maybe_rebalance(self, iid: InstrumentId) -> None:
@@ -159,10 +172,6 @@ class FixedNotional(Strategy):
             pass
 
     def on_stop(self) -> None:
-        self.close_all_positions()
-        if self._redis is not None:
-            try:
-                self._redis.srem(STRATEGY_SET, str(self.id))
-                self._redis.delete(f"{METRICS_PREFIX}{self.id}")
-            except Exception:
-                pass
+        # Keep metrics in Redis so the strategy stays visible on the dashboard
+        # (with its description) while stopped. Nothing to tear down here.
+        pass

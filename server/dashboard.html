@@ -256,6 +256,11 @@
       <span class="sm-name" id="modalStratName"></span>
       <button onclick="closeStratModal()">✕</button>
     </div>
+    <div id="modalControls" style="display:flex;gap:7px;margin-bottom:12px;">
+      <button class="btn" style="flex:1;font-size:11px;color:var(--green);" onclick="stratCmd('start_strategy')">▶ Start</button>
+      <button class="btn" style="flex:1;font-size:11px;" onclick="stratCmd('stop_strategy')">⏸ Pause</button>
+      <button class="btn" style="flex:1;font-size:11px;color:var(--red);" onclick="stratCmd('close_strategy')">✕ Close All</button>
+    </div>
     <div class="strat-modal-desc" id="modalDesc">–</div>
     <div class="strat-modal-sec">Strategy PnL</div>
     <div id="modalPnl"></div>
@@ -676,7 +681,9 @@ function onPortfolio(m){
       const safe=sid.replace(/[^a-zA-Z0-9]/g,"_");
       const n=(orderState[sid]||{}).pending||0;
       const badge=`<span class="sr-pending" id="srp-${safe}">${n>0?`● ${n} pending`:""}</span>`;
-      return `<div class="strat-row" id="sr-${safe}" onclick="openStratModal('${sid}')"><span class="sr-name">${sid}</span>${badge}${px}</div>`;
+      const state=(m.strategy_states||{})[sid]||"RUNNING";
+      const stateDot=`<span style="font-size:9px;font-weight:700;margin-left:5px;color:${state==="RUNNING"?"var(--green)":"var(--dim-2)"};">${state==="RUNNING"?"▶":"⏸"}</span>`;
+      return `<div class="strat-row" id="sr-${safe}" onclick="openStratModal('${sid}')"><span class="sr-name">${sid}</span>${stateDot}${badge}${px}</div>`;
     }).join("");
   }
   // Refresh modal if open
@@ -692,13 +699,28 @@ function onOrderEvent(m){
 
   if(m.status==="submitted"){
     state.pending=Math.max(0,state.pending+1);
-    hist.unshift({instrument:m.instrument,side:m.side,qty:m.qty,status:"pending",ts:m.ts});
-    if(hist.length>MAX_ORDER_HISTORY) hist.length=MAX_ORDER_HISTORY;
   } else {
     state.pending=Math.max(0,state.pending-1);
-    // Update the most recent matching pending entry
-    const entry=hist.find(o=>o.instrument===m.instrument&&o.status==="pending");
-    if(entry) entry.status=m.status;
+  }
+
+  // Build round-trip trades from fills: a BUY opens a row; the matching SELL
+  // closes that same row (grays out, shows realized PnL = (out-in)*qty).
+  if(m.status==="filled"){
+    const px=parseFloat(m.price)||0;
+    const qty=parseFloat(m.qty)||0;
+    if(m.side==="BUY"){
+      hist.unshift({instrument:m.instrument,qty,entryPx:px,entryTs:m.ts,status:"open",exitPx:null,exitTs:null,pnl:null});
+      if(hist.length>MAX_ORDER_HISTORY) hist.length=MAX_ORDER_HISTORY;
+    } else if(m.side==="SELL"){
+      const t=hist.find(o=>o.instrument===m.instrument&&o.status==="open");
+      if(t){
+        t.exitPx=px; t.exitTs=m.ts; t.status="closed";
+        t.pnl=(px-t.entryPx)*t.qty;
+      } else {
+        hist.unshift({instrument:m.instrument,qty,entryPx:null,entryTs:null,status:"closed",exitPx:px,exitTs:m.ts,pnl:null});
+        if(hist.length>MAX_ORDER_HISTORY) hist.length=MAX_ORDER_HISTORY;
+      }
+    }
   }
 
   const safe=sid.replace(/[^a-zA-Z0-9]/g,"_");
@@ -718,13 +740,27 @@ function _renderOrdersList(sid){
   if(!hist.length){ el.innerHTML='<div style="color:var(--dim-2);font-size:10.5px;padding:6px 4px;">no orders yet</div>'; return; }
   el.innerHTML=hist.map(o=>{
     const sym=o.instrument.split(".")[0];
-    const sideCls=o.side==="BUY"?"up":(o.side==="SELL"?"down":"");
-    const t=o.ts?new Date(o.ts*1000).toLocaleTimeString("en-GB",{hour12:false}):"";
-    return `<div class="order-row status-${o.status}">
-      <div class="or-top"><span class="or-sym">${sym}</span><span class="or-status ${o.status}">${o.status}</span></div>
-      <div class="or-detail"><span class="${sideCls}">${o.side||"–"}</span> ${o.qty||"–"} &nbsp;·&nbsp; ${t}</div>
+    const closed=o.status==="closed";
+    const tm=(ts)=>ts?new Date(ts*1000).toLocaleTimeString("en-GB",{hour12:false}):"";
+    const inStr=o.entryPx!=null?fmt(o.entryPx):"–";
+    const outStr=o.exitPx!=null?fmt(o.exitPx):"–";
+    let pnlHtml="";
+    if(o.pnl!=null){
+      const cls=o.pnl>=0?"up":"down";
+      pnlHtml=`&nbsp;·&nbsp;<span class="${cls}">${(o.pnl>=0?"+":"")+o.pnl.toFixed(2)}</span>`;
+    }
+    return `<div class="order-row status-${o.status}" style="${closed?'opacity:0.5;':''}">
+      <div class="or-top"><span class="or-sym">${sym}</span><span class="or-status ${o.status}">${closed?'closed':'open'}</span></div>
+      <div class="or-detail">qty ${fmtQty(o.qty)} &nbsp;·&nbsp; in ${inStr}${closed?` → out ${outStr}`:''}${pnlHtml}</div>
+      <div class="or-detail" style="color:var(--dim-2);">${tm(o.entryTs)}${closed?` → ${tm(o.exitTs)}`:''}</div>
     </div>`;
   }).join("");
+}
+
+async function stratCmd(action){
+  if(!activeModal) return;
+  await fetch("/api/command",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({action, strategy_id:activeModal})});
 }
 
 function openStratModal(stratId){
@@ -766,14 +802,27 @@ function _populateModal(stratId){
   }
   // Live metrics (exclude description — it's shown in the desc block)
   const metricsEl=document.getElementById("modalMetrics");
-  const metricEntries=Object.entries(metrics).filter(([k])=>k!=="description");
+  const emas=metrics.emas&&typeof metrics.emas==="object"?metrics.emas:null;
+  const metricEntries=Object.entries(metrics).filter(([k])=>k!=="description"&&k!=="emas");
+  let html="";
   if(metricEntries.length){
-    metricsEl.innerHTML=metricEntries.map(([k,v])=>
+    html+=metricEntries.map(([k,v])=>
       `<div class="tile"><span class="lbl">${k}</span><span class="val" style="font-size:12px;">${fmtMetric(v)}</span></div>`
     ).join("");
-  } else {
-    metricsEl.innerHTML='<div style="color:var(--dim-2);font-size:10.5px;padding:2px 0 6px;">no metrics yet</div>';
   }
+  if(emas){
+    const rows=Object.entries(emas).sort((a,b)=>a[0].localeCompare(b[0])).map(([sym,e])=>{
+      const cls=(e.fast_ema>=e.slow_ema)?"up":"down";
+      return `<div style="display:flex;justify-content:space-between;gap:8px;font-size:10.5px;padding:2px 0;border-bottom:1px solid var(--line-soft);">
+        <span style="min-width:70px;"><b>${sym}</b></span>
+        <span class="${cls}">fast ${fmtMetric(e.fast_ema)}</span>
+        <span class="${cls}">slow ${fmtMetric(e.slow_ema)}</span>
+        <span style="color:var(--dim);">${fmtMetric(e.last_close)}</span>
+      </div>`;
+    }).join("");
+    html+=`<div style="grid-column:1/-1;margin-top:4px;"><div style="color:var(--dim);font-size:10px;margin-bottom:2px;">EMAs (fast vs slow)</div>${rows}</div>`;
+  }
+  metricsEl.innerHTML=html||'<div style="color:var(--dim-2);font-size:10.5px;padding:2px 0 6px;">no metrics yet</div>';
   // Positions
   const posEl=document.getElementById("modalPositions");
   if(positions.length){
@@ -784,7 +833,7 @@ function _populateModal(stratId){
       const symPanel=panels[p.instrument];
       const livePx=symPanel&&symPanel.ticks.length?symPanel.ticks[symPanel.ticks.length-1].v:null;
       const lastPx=livePx??((lastPortfolio.prices||{})[p.instrument]??null);
-      const posVal=lastPx!=null?p.qty*lastPx:null;
+      const posVal=(p.value!=null)?p.value:(lastPx!=null?p.qty*lastPx:null);
       return `<div style="border:1px solid var(--line-soft);border-radius:6px;padding:6px 8px;margin-bottom:6px;font-size:10.5px;">
         <div style="display:flex;justify-content:space-between;"><b>${sym}</b><span class="${sideCls}">${p.side} ${fmtQty(p.qty)}</span></div>
         <div style="display:flex;justify-content:space-between;color:var(--dim);margin-top:3px;"><span>avg ${fmt(p.avg_px)}</span><span class="${upCls}">${(p.unrealized>=0?"+":"")+p.unrealized.toFixed(2)} ${p.ccy}</span></div>

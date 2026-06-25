@@ -45,8 +45,11 @@ DEFAULT_WINDOW = "10m"
 WINDOWS = {"2m", "10m", "30m", "1h", "4h", "1d", "3d"}
 TRADES_INFIX = ":data.trades."
 COMMAND_STREAM = "dashboard:commands"   # ControlActor polls this (see control_actor.py)
+STRATEGY_CMDS_STREAM = "dashboard:strategy_cmds"
+STRATEGY_STATES_KEY = "dashboard:strategy_states"
 INDICATORS_PREFIX = "dashboard:indicators:"
 ORDER_EVENTS_KEY = "dashboard:order_events"
+STRATEGY_ACTIONS = {"start_strategy", "stop_strategy", "close_strategy"}
 
 app = FastAPI()
 # socket_timeout=None: blocking XREAD must not be killed by a read timeout when
@@ -57,6 +60,12 @@ r = aioredis.from_url(REDIS_URL, decode_responses=True, socket_timeout=None, soc
 async def _send_command(cmd: dict) -> None:
     """Publish a command to the engine's command stream; the ControlActor polls it."""
     await r.xadd(COMMAND_STREAM, {"json": json.dumps(cmd)}, maxlen=1000, approximate=True)
+
+
+async def _send_strategy_command(cmd: dict) -> None:
+    """Publish a strategy control command; the strategy manager thread in binance_data.py polls it."""
+    fields = {k: str(v) for k, v in cmd.items()}
+    await r.xadd(STRATEGY_CMDS_STREAM, fields, maxlen=100, approximate=True)
 
 
 # ── topic <-> symbol helpers ────────────────────────────────────────────────
@@ -515,7 +524,11 @@ async def _portfolio_frame() -> dict | None:
                 metrics[sid] = json.loads(mraw)
         except Exception:
             pass
-    return {"type": "portfolio", **snap, "metrics": metrics}
+    try:
+        strategy_states = await r.hgetall(STRATEGY_STATES_KEY)
+    except Exception:
+        strategy_states = {}
+    return {"type": "portfolio", **snap, "metrics": metrics, "strategy_states": strategy_states}
 
 
 async def _tail_order_events() -> None:
@@ -537,6 +550,7 @@ async def _tail_order_events() -> None:
                     "status": fields.get("status", ""),
                     "side": fields.get("side", ""),
                     "qty": fields.get("qty", ""),
+                    "price": fields.get("price", ""),
                     "ts": float(fields.get("ts", 0)),
                 }
                 for ws in list(clients):
@@ -584,6 +598,22 @@ async def ws_endpoint(websocket: WebSocket):
     frame = await _portfolio_frame()
     if frame:
         await _safe_send(websocket, frame)
+    # Replay recent order events so the client sees history from before it connected.
+    try:
+        past = await r.xrevrange(ORDER_EVENTS_KEY, count=500)
+        for _id, fields in reversed(past):
+            await _safe_send(websocket, {
+                "type": "order_event",
+                "strategy": fields.get("strategy", ""),
+                "instrument": fields.get("instrument", ""),
+                "status": fields.get("status", ""),
+                "side": fields.get("side", ""),
+                "qty": fields.get("qty", ""),
+                "price": fields.get("price", ""),
+                "ts": float(fields.get("ts", 0)),
+            })
+    except Exception:
+        pass
     try:
         while True:
             raw = await websocket.receive_text()
@@ -697,7 +727,10 @@ async def command(cmd: dict):
     """
     if not isinstance(cmd, dict) or "action" not in cmd:
         return JSONResponse({"ok": False, "error": "missing 'action'"}, status_code=400)
-    await _send_command(cmd)
+    if cmd.get("action") in STRATEGY_ACTIONS:
+        await _send_strategy_command(cmd)
+    else:
+        await _send_command(cmd)
     return JSONResponse({"ok": True, "sent": cmd})
 
 

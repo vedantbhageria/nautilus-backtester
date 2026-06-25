@@ -89,35 +89,49 @@ class ControlActor(Actor):
             venues = {p.instrument_id.venue for p in self.cache.positions()}
             pnl: dict[str, dict] = {}
             for venue in venues:
-                for ccy, money in (self.portfolio.realized_pnls(venue) or {}).items():
-                    pnl.setdefault(ccy.code, {"realized": 0.0, "unrealized": 0.0})["realized"] += money.as_double()
-                for ccy, money in (self.portfolio.unrealized_pnls(venue) or {}).items():
-                    pnl.setdefault(ccy.code, {"realized": 0.0, "unrealized": 0.0})["unrealized"] += money.as_double()
+                try:
+                    for ccy, money in (self.portfolio.realized_pnls(venue) or {}).items():
+                        if money is not None:
+                            pnl.setdefault(ccy.code, {"realized": 0.0, "unrealized": 0.0})["realized"] += money.as_double()
+                    for ccy, money in (self.portfolio.unrealized_pnls(venue) or {}).items():
+                        if money is not None:
+                            pnl.setdefault(ccy.code, {"realized": 0.0, "unrealized": 0.0})["unrealized"] += money.as_double()
+                except Exception:
+                    # Prices can be momentarily unavailable during a websocket
+                    # reconnect; skip this venue's PnL for this tick.
+                    continue
             for v in pnl.values():
                 v["total"] = v["realized"] + v["unrealized"]
             positions = []
+            prices = {}
             for p in self.cache.positions_open():
-                up = self.portfolio.unrealized_pnl(p.instrument_id)
+                try:
+                    up = self.portfolio.unrealized_pnl(p.instrument_id)
+                except Exception:
+                    up = None
+                try:
+                    exposure = self.portfolio.net_exposure(p.instrument_id)
+                    value = float(exposure) if exposure is not None else None
+                except Exception:
+                    value = None
                 positions.append({
                     "instrument": str(p.instrument_id),
                     "strategy": str(p.strategy_id),
                     "side": p.side.name,
                     "qty": p.quantity.as_double(),
                     "avg_px": p.avg_px_open,
+                    "value": value,
                     "realized": p.realized_pnl.as_double() if p.realized_pnl is not None else 0.0,
                     "unrealized": up.as_double() if up is not None else 0.0,
                     "ccy": up.currency.code if up is not None else "",
                 })
-            prices = {}
-            for p in self.cache.positions_open():
                 tick = self.cache.trade_tick(p.instrument_id)
                 if tick is not None:
                     prices[str(p.instrument_id)] = float(tick.price)
-            names = {str(s) for s in self.cache.strategy_ids()}
             try:
-                names |= set(self._redis.smembers(STRATEGY_SET) or [])
+                names = set(self._redis.smembers(STRATEGY_SET) or [])
             except Exception:
-                pass
+                names = set()
             snap = {
                 "ts": int(self.clock.timestamp_ns() // 1_000_000),
                 "strategies": sorted(names),
