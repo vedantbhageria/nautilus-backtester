@@ -39,7 +39,7 @@ HTML_PATH = os.path.join(os.path.dirname(__file__), "dashboard.html")
 
 QUICK_HISTORY_COUNT = 500
 HIST_FETCH_CAP = 50000   # max backfilled entries pulled into history (dense tick ranges)
-XREAD_BLOCK_MS = 5000
+XREAD_BLOCK_MS = 50
 XREAD_COUNT = 500
 DEFAULT_WINDOW = "10m"
 WINDOWS = {"2m", "10m", "30m", "1h", "4h", "1d", "3d"}
@@ -54,7 +54,7 @@ STRATEGY_ACTIONS = {"start_strategy", "stop_strategy", "close_strategy"}
 app = FastAPI()
 # socket_timeout=None: blocking XREAD must not be killed by a read timeout when
 # data is briefly idle (that was crashing the tail tasks).
-r = aioredis.from_url(REDIS_URL, decode_responses=True, socket_timeout=None, socket_keepalive=True)
+r = aioredis.from_url(REDIS_URL, decode_responses=True, socket_timeout=None, socket_keepalive=True, max_connections=300)
 
 
 async def _send_command(cmd: dict) -> None:

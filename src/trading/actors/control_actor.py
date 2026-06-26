@@ -36,6 +36,9 @@ class ControlActor(Actor):
         self._redis = None
         self._cmd_cursor = "$"
         self._indicators: dict[str, dict] = {}       # "{instrument_id}:{spec}" -> indicator instances
+        # Closed positions copied out of the cache before it purges them (~1 min),
+        # so the dashboard's closed-positions list stays stable. position_id -> record.
+        self._closed_positions: dict[str, dict] = {}
 
     def on_start(self) -> None:
         try:
@@ -67,22 +70,6 @@ class ControlActor(Actor):
         if self._redis is None:
             return
         try:
-            venues = {p.instrument_id.venue for p in self.cache.positions()}
-            pnl: dict[str, dict] = {}
-            for venue in venues:
-                try:
-                    for ccy, money in (self.portfolio.realized_pnls(venue) or {}).items():
-                        if money is not None:
-                            pnl.setdefault(ccy.code, {"realized": 0.0, "unrealized": 0.0})["realized"] += money.as_double()
-                    for ccy, money in (self.portfolio.unrealized_pnls(venue) or {}).items():
-                        if money is not None:
-                            pnl.setdefault(ccy.code, {"realized": 0.0, "unrealized": 0.0})["unrealized"] += money.as_double()
-                except Exception:
-                    # Prices can be momentarily unavailable during a websocket
-                    # reconnect; skip this venue's PnL for this tick.
-                    continue
-            for v in pnl.values():
-                v["total"] = v["realized"] + v["unrealized"]
             positions = []
             prices = {}
             for p in self.cache.positions_open():
@@ -96,6 +83,7 @@ class ControlActor(Actor):
                 except Exception:
                     value = None
                 positions.append({
+                    "id": str(p.id),
                     "instrument": str(p.instrument_id),
                     "strategy": str(p.strategy_id),
                     "side": p.side.name,
@@ -105,10 +93,48 @@ class ControlActor(Actor):
                     "realized": p.realized_pnl.as_double() if p.realized_pnl is not None else 0.0,
                     "unrealized": up.as_double() if up is not None else 0.0,
                     "ccy": up.currency.code if up is not None else "",
+                    "ts_opened": int(p.ts_opened // 1_000_000) if p.ts_opened else 0,
                 })
                 tick = self.cache.trade_tick(p.instrument_id)
                 if tick is not None:
                     prices[str(p.instrument_id)] = float(tick.price)
+            # Capture newly-closed positions into a persistent map (the cache
+            # purges closed positions after ~1 min). Keyed by position id so each
+            # is recorded once; updates are idempotent.
+            for p in self.cache.positions_closed():
+                rp = p.realized_pnl
+                self._closed_positions[str(p.id)] = {
+                    "id": str(p.id),
+                    "instrument": str(p.instrument_id),
+                    "strategy": str(p.strategy_id),
+                    "side": "LONG" if p.entry.name == "BUY" else "SHORT",
+                    "qty": p.peak_qty.as_double(),
+                    "avg_px_open": p.avg_px_open,
+                    "avg_px_close": p.avg_px_close,
+                    "realized": rp.as_double() if rp is not None else 0.0,
+                    "ccy": rp.currency.code if rp is not None else "",
+                    "ts_opened": int(p.ts_opened // 1_000_000) if p.ts_opened else 0,
+                    "ts_closed": int(p.ts_closed // 1_000_000) if p.ts_closed else 0,
+                }
+            # Held for the entire session (no cap) so the dashboard keeps the full
+            # position history, matching the now-unpurged exec-engine cache.
+            closed_positions = sorted(
+                self._closed_positions.values(), key=lambda c: c["ts_closed"], reverse=True,
+            )
+            # Aggregate PnL from the same position data the per-strategy view uses,
+            # so the total equals the sum of the per-strategy PnLs. Realized includes
+            # retained closed positions (the portfolio's own realized PnL drops them
+            # once the cache purges closed positions).
+            pnl: dict[str, dict] = {}
+            for rec in positions:
+                d = pnl.setdefault(rec["ccy"] or "USDT", {"realized": 0.0, "unrealized": 0.0})
+                d["realized"] += rec["realized"]
+                d["unrealized"] += rec["unrealized"]
+            for c in self._closed_positions.values():
+                d = pnl.setdefault(c["ccy"] or "USDT", {"realized": 0.0, "unrealized": 0.0})
+                d["realized"] += c["realized"]
+            for v in pnl.values():
+                v["total"] = v["realized"] + v["unrealized"]
             try:
                 names = set(self._redis.smembers(STRATEGY_SET) or [])
             except Exception:
@@ -117,6 +143,7 @@ class ControlActor(Actor):
                 "ts": int(self.clock.timestamp_ns() // 1_000_000),
                 "strategies": sorted(names),
                 "positions": positions,
+                "closed_positions": closed_positions,
                 "prices": prices,
                 "pnl": pnl,
             }

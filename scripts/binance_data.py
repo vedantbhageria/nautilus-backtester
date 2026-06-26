@@ -1,6 +1,9 @@
 import os
+import csv
+import json
 import time
 import threading
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 
 import redis as syncredis
@@ -8,6 +11,7 @@ from dotenv import load_dotenv
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.adapters.binance import BinanceLiveDataClientFactory
 from nautilus_trader.adapters.binance import BinanceLiveExecClientFactory
+from nautilus_trader.adapters.sandbox.factory import SandboxLiveExecClientFactory
 from nautilus_trader.model.data import BarType
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.examples.algorithms.twap import TWAPExecAlgorithm
@@ -15,6 +19,7 @@ from nautilus_trader.examples.algorithms.twap import TWAPExecAlgorithm
 from trading.configs.binance_config import config_node, BINANCE_SPOT, BINANCE_FUTURES
 from trading.actors.control_actor import ControlActor, ControlActorConfig
 from trading.strategies.EMACross import EMACross, EMACrossConfig
+from trading.strategies.EMACrossShortTest import EMACrossStopReverse, EMACrossSARConfig
 from trading.strategies.fixed_positions import FixedNotional, FixedNotionalConfig, STRATEGY_SET
 
 load_dotenv()
@@ -26,6 +31,57 @@ _stop_event = threading.Event()
 
 
 STRATEGY_STATES_KEY = "dashboard:strategy_states"
+PORTFOLIO_KEY = "dashboard:portfolio"
+EXPORT_DIR = os.getenv("POSITION_EXPORT_DIR", "exports")
+
+
+def _iso(ms):
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat() if ms else ""
+
+
+def _export_positions_csv(r, sid):
+    """Write the strategy's full position history to a CSV on the node machine.
+
+    Reads the ControlActor's portfolio snapshot (which retains the whole session's
+    closed positions), so it's strategy-agnostic and independent of any browser.
+    """
+    try:
+        raw = r.get(PORTFOLIO_KEY)
+        if not raw:
+            print(f"[export] no portfolio snapshot available for {sid}")
+            return
+        snap = json.loads(raw)
+        open_ = [p for p in snap.get("positions", []) if p.get("strategy") == sid]
+        closed = [p for p in snap.get("closed_positions", []) if p.get("strategy") == sid]
+        os.makedirs(EXPORT_DIR, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = os.path.join(EXPORT_DIR, f"positions_{sid}_{ts}.csv")
+        def _ist(ms):
+            if not ms: return ""
+            return (datetime.fromisoformat(_iso(ms).replace("Z", "")) + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
+        def _hold(a, b):
+            if not a or not b: return ""
+            s = int((b - a) / 1000)
+            m = s // 60
+            return f"{m}m {s % 60}s" if m else f"{s}s"
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["symbol", "strategy", "side", "qty", "entry", "exit",
+                        "entry_px", "exit_px", "pnl", "ccy", "hold"])
+            for p in closed:
+                w.writerow([
+                    p.get("instrument", "").split(".")[0],
+                    (p.get("strategy") or "").split("-None")[0],
+                    p.get("side"), p.get("qty"),
+                    _ist(p.get("ts_opened")), _ist(p.get("ts_closed")),
+                    p.get("avg_px_open"), p.get("avg_px_close"),
+                    p.get("realized"), p.get("ccy"),
+                    _hold(p.get("ts_opened"), p.get("ts_closed")),
+                ])
+                
+        print(f"[export] wrote {len(closed)} closed + {len(open_)} open positions to {path}")
+    except Exception as e:
+        print(f"[export] failed for {sid}: {e}")
 
 
 def _safe_call(fn, label):
@@ -43,6 +99,24 @@ def _arm(strat):
 
 def _disarm(strat):
     return lambda: setattr(strat, "_active", False)
+
+
+def _cancel_all(strat):
+    # Cancel every open order for this strategy (cancel_all_orders needs a
+    # per-instrument id, so iterate the strategy's open orders from the cache).
+    def fn():
+        for o in list(strat.cache.orders_open(strategy_id=strat.id)):
+            strat.cancel_order(o)
+    return fn
+
+
+def _close_all(strat):
+    # Close every open position for this strategy (close_all_positions needs a
+    # per-instrument id, so iterate the strategy's open positions from the cache).
+    def fn():
+        for p in list(strat.cache.positions_open(strategy_id=strat.id)):
+            strat.close_position(p)
+    return fn
 
 
 def _strategy_manager(loop):
@@ -79,6 +153,7 @@ def _strategy_manager(loop):
                 try:
                     if action == "stop_strategy":
                         loop.call_soon_threadsafe(_disarm(strat))
+                        loop.call_soon_threadsafe(_safe_call(_cancel_all(strat), f"cancel-orders({sid})"))
                         loop.call_soon_threadsafe(_safe_call(strat.stop, f"stop({sid})"))
                         r.hset(STRATEGY_STATES_KEY, sid, "STOPPED")
                         print(f"[strategy_manager] stop scheduled for {sid}")
@@ -89,8 +164,10 @@ def _strategy_manager(loop):
                         r.hset(STRATEGY_STATES_KEY, sid, "RUNNING")
                         print(f"[strategy_manager] start scheduled for {sid}")
                     elif action == "close_strategy":
+                        _export_positions_csv(r, sid)
                         loop.call_soon_threadsafe(_disarm(strat))
-                        loop.call_soon_threadsafe(_safe_call(strat.close_all_positions, f"close_all({sid})"))
+                        loop.call_soon_threadsafe(_safe_call(_cancel_all(strat), f"cancel-orders({sid})"))
+                        loop.call_soon_threadsafe(_safe_call(_close_all(strat), f"close_all({sid})"))
                         loop.call_soon_threadsafe(_safe_call(strat.stop, f"stop({sid})"))
                         r.hset(STRATEGY_STATES_KEY, sid, "STOPPED")
                         print(f"[strategy_manager] close+stop scheduled for {sid}")
@@ -114,7 +191,36 @@ PERP_INSTRUMENTS = tuple(
     for sym in _PERP_SYMS
 )
 
+_PERP_SYMS_STOP_REVERSES = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT",
+    "TRXUSDT", "HYPEUSDT", "DOGEUSDT", "ZECUSDT", "LABUSDT",
+    "XLMUSDT", "XMRUSDT", "CCUSDT", "LINKUSDT", "ADAUSDT",
+    "BCHUSDT", "LTCUSDT", "HBARUSDT", "SUIUSDT", "AVAXUSDT",
+    "1000SHIBUSDT", "NEARUSDT", "TAOUSDT", "WLFIUSDT", "PAXGUSDT",
+    "UNIUSDT", "ASTERUSDT", "WLDUSDT", "ONDOUSDT", "DOTUSDT",
+    "AAVEUSDT", "SKYUSDT", "MUSDT", "ETCUSDT", "MORPHOUSDT",
+    "DEXEUSDT", "1000PEPEUSDT", "QNTUSDT", "ATOMUSDT", "RENDERUSDT",
+    "POLUSDT", "KASUSDT", "ALGOUSDT", "ENAUSDT", "JUPUSDT",
+    "JSTUSDT", "BEATUSDT", "VVVUSDT", "FILUSDT", "NIGHTUSDT",
+    "APTUSDT", "ARBUSDT", "AEROUSDT", "INJUSDT", "DASHUSDT",
+    "CAKEUSDT", "TRUMPUSDT", "VETUSDT", "FETUSDT", "PENGUUSDT",
+    "SEIUSDT", "JTOUSDT", "1000BONKUSDT", "1000LUNCUSDT", "ETHFIUSDT",
+    "VIRTUALUSDT", "KITEUSDT", "TIAUSDT", "SUNUSDT", "SKYAIUSDT",
+    "STXUSDT", "SPXUSDT", "CRVUSDT", "XPLUSDT", "GRASSUSDT",
+    "GWEIUSDT", "PYTHUSDT", "XTZUSDT", "OPUSDT", "MONUSDT",
+    "CFXUSDT", "JASMYUSDT", "BSVUSDT", "BUSDT", "1000FLOKIUSDT",
+    "PENDLEUSDT", "VELVETUSDT", "LDOUSDT", "ZROUSDT", "KAIAUSDT",
+    "AKTUSDT", "GRTUSDT", "STRKUSDT", "CHZUSDT", "UBUSDT",
+    "AXSUSDT", "IOTAUSDT", "ENSUSDT", "EIGENUSDT", "COMPUSDT",
+]
+
+PERP_INSTRUMENTS_SAR = tuple(
+    InstrumentId.from_str(f"{sym}-PERP.{BINANCE_FUTURES}")
+    for sym in _PERP_SYMS_STOP_REVERSES
+)
+
 node.trader.add_actor(ControlActor(ControlActorConfig()))
+
 # _fn = FixedNotional(FixedNotionalConfig(
 #     strategy_id="FixedNotional-001",
 #     instrument_ids=PERP_INSTRUMENTS,
@@ -130,23 +236,38 @@ _ema = EMACross(EMACrossConfig(
     instrument_ids=PERP_INSTRUMENTS,
     trade_usd=Decimal("2000"),
     bar_spec="5-SECOND-LAST",   # 5-second bars per instrument
-    fast_ema_period=5,
+    fast_ema_period=5,  #60 180
     slow_ema_period=10,
 ))
+_ema_SAR = EMACrossStopReverse(EMACrossSARConfig(
+    strategy_id="EMACrossStop&Reverse-001",
+    instrument_ids=PERP_INSTRUMENTS_SAR,
+    trade_usd=Decimal("2000"),
+    bar_spec="5-SECOND-LAST",   # 5-second bars per instrument
+    fast_ema_period=5,  
+    slow_ema_period=10,
+))
+
 node.trader.add_strategy(_ema)
+node.trader.add_strategy(_ema_SAR)
 _strats[str(_ema.id)] = _ema
+_strats[str(_ema_SAR.id)] = _ema_SAR
+
 print(f"[binance_data] strategy registered: id={_ema.id!r}")
+print(f"[binance_data] strategy registered: id={_ema_SAR.id!r}")
+
 #exec_algorithm = TWAPExecAlgorithm()
 #node.trader.add_exec_algorithm(exec_algorithm)
 
 
 for name in (BINANCE_SPOT, BINANCE_FUTURES):
     node.add_data_client_factory(name, BinanceLiveDataClientFactory)
-    node.add_exec_client_factory(name, BinanceLiveExecClientFactory)
+node.add_exec_client_factory(BINANCE_FUTURES, SandboxLiveExecClientFactory)
 
 node.build()
 
 # Write initial RUNNING state for all registered strategies.
+
 """
 _r = syncredis.Redis.from_url(REDIS_URL, decode_responses=True)
 for _sid in _strats:
@@ -157,7 +278,7 @@ _r.close()
 if __name__ == "__main__":
     r = syncredis.Redis.from_url(REDIS_URL, decode_responses=True)
     r.flushall()
-    # Show strategies on the dashboard immediately as STOPPED — they don't run
+    # Show strategies on the dashboard immediately as STOPPED, they don't run
     # until the user presses Start (the manager auto-stops them on startup).
     for _sid in _strats:
         r.sadd(STRATEGY_SET, _sid)

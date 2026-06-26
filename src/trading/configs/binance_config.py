@@ -18,6 +18,7 @@ from nautilus_trader.adapters.binance import BinanceExecClientConfig
 from nautilus_trader.adapters.binance import BinanceAccountType
 from nautilus_trader.adapters.binance import BinanceInstrumentProviderConfig
 from nautilus_trader.adapters.binance.common.enums import BinanceEnvironment
+from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
 
 BINANCE_SPOT = "BINANCE_SPOT"          # instruments -> e.g. BTCUSDT.BINANCE_SPOT
 BINANCE_FUTURES = "BINANCE_FUTURES"    # instruments -> e.g. BTCUSDT-PERP.BINANCE_FUTURES
@@ -56,13 +57,8 @@ config_node = TradingNodeConfig(
         # snapshot_orders=True,
         # snapshot_positions=True,
         # snapshot_positions_interval_secs=5.0,
-        purge_closed_orders_interval_mins=1,
-        purge_closed_orders_buffer_mins=0,
-        purge_closed_positions_interval_mins=1,
-        purge_closed_positions_buffer_mins=0,
-        purge_account_events_interval_mins=1,
-        purge_account_events_lookback_mins=0,
-        purge_from_database=True,
+        # No purging: hold closed orders/positions/account events in the cache for
+        # the entire session so the dashboard keeps the full position history.
         graceful_shutdown_on_exception=True,
     ),
     cache=CacheConfig(
@@ -78,13 +74,14 @@ config_node = TradingNodeConfig(
         streams_prefix="stream",
         autotrim_mins=STREAM_RETENTION_MINS,
         heartbeat_interval_secs=1,
+        buffer_interval_ms=50,
         types_filter=[CryptoPerpetual, CryptoFuture, CurrencyPair],
     ),
     data_clients={
         BINANCE_SPOT: BinanceDataClientConfig(
             venue=Venue(BINANCE_SPOT),
             account_type=BinanceAccountType.SPOT,
-            environment=BinanceEnvironment.DEMO,
+            environment=BinanceEnvironment.LIVE,
             use_agg_trade_ticks=True,  
             instrument_provider=BinanceInstrumentProviderConfig(
                 load_all=True,
@@ -93,21 +90,18 @@ config_node = TradingNodeConfig(
         BINANCE_FUTURES: BinanceDataClientConfig(
             venue=Venue(BINANCE_FUTURES),
             account_type=BinanceAccountType.USDT_FUTURES,
-            environment=BinanceEnvironment.DEMO,
+            environment=BinanceEnvironment.LIVE,
             use_agg_trade_ticks=True,
             instrument_provider=BinanceInstrumentProviderConfig(
                 load_all=True,
             ),
         ),
     },
+
     exec_clients={
-        BINANCE_FUTURES: BinanceExecClientConfig(
-            venue=Venue(BINANCE_FUTURES),
-            account_type=BinanceAccountType.USDT_FUTURES,
-            environment=BinanceEnvironment.DEMO,
-            instrument_provider=BinanceInstrumentProviderConfig(
-                load_all=True,
-            ),
+        BINANCE_FUTURES: SandboxExecutionClientConfig(
+        venue=BINANCE_FUTURES,
+        starting_balances=["100000 USDT"],
         ),
     },
     timeout_connection=30.0,
@@ -116,3 +110,12 @@ config_node = TradingNodeConfig(
     timeout_disconnection=30.0,
     timeout_post_stop=30.0,
 )
+
+"""        BINANCE_FUTURES: BinanceExecClientConfig(
+            venue=Venue(BINANCE_FUTURES),
+            account_type=BinanceAccountType.USDT_FUTURES,
+            environment=BinanceEnvironment.DEMO,
+            instrument_provider=BinanceInstrumentProviderConfig(
+                load_all=True,
+            ),
+        ),"""

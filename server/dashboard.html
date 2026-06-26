@@ -92,21 +92,26 @@
   .sr-pending{ font-size:9px; font-weight:700; color:var(--amber); white-space:nowrap; margin-left:6px; }
   /* Strategy modal */
   .strat-modal-backdrop{ position:fixed; inset:0; z-index:200; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; gap:12px; }
-  .strat-modal-card{ background:var(--panel); border:1px solid var(--line); border-radius:10px; width:420px; max-height:78vh; overflow-y:auto; padding:18px 20px 20px; position:relative; flex-shrink:0; }
-  /* Orders side panel */
-  .orders-panel{ background:var(--panel); border:1px solid var(--line); border-radius:10px; width:300px; max-height:78vh; display:flex; flex-direction:column; flex-shrink:0; overflow:hidden; }
+  .strat-modal-card{ background:var(--panel); border:1px solid var(--line); border-radius:10px; width:360px; max-height:78vh; overflow-y:auto; padding:18px 20px 20px; position:relative; flex-shrink:0; }
+  /* Orders / positions side panels */
+  .orders-panel{ background:var(--panel); border:1px solid var(--line); border-radius:10px; width:230px; max-height:78vh; display:flex; flex-direction:column; flex-shrink:0; overflow:hidden; }
   .orders-panel-head{ padding:12px 14px 8px; font-size:9px; letter-spacing:.12em; text-transform:uppercase; color:var(--dim-2); border-bottom:1px solid var(--line-soft); flex-shrink:0; }
   .orders-list{ flex:1; overflow-y:auto; padding:6px 8px; }
   .orders-list::-webkit-scrollbar{ width:4px; } .orders-list::-webkit-scrollbar-thumb{ background:var(--line); border-radius:2px; }
+  .pos-row{ border:1px solid var(--line-soft); border-radius:6px; padding:6px 8px; margin-bottom:6px; font-size:10.5px; }
+  .pos-row.flash-add{ background:rgba(38,166,154,0.28); border-color:var(--green); }
+  .pos-row.flash-del{ background:rgba(239,83,80,0.28); border-color:var(--red); opacity:1 !important; }
+  .pos-empty{ color:var(--dim-2); font-size:10.5px; padding:6px 4px; }
   .order-row{ display:flex; flex-direction:column; gap:2px; padding:5px 7px; border-radius:6px; margin-bottom:4px; border:1px solid var(--line-soft); font-size:10.5px; transition:border-color .3s,background .3s; }
   .order-row.status-pending{ border-color:var(--amber); background:rgba(224,162,51,0.05); }
-  .order-row.status-filled{ border-color:var(--green); background:rgba(38,166,154,0.08); }
+  .order-row.status-accepted{ border-color:var(--green); background:rgba(38,166,154,0.08); }
   .order-row.status-rejected{ border-color:var(--red); background:rgba(239,83,80,0.08); }
   .order-row.status-canceled{ border-color:var(--dim-2); }
   .order-row .or-top{ display:flex; justify-content:space-between; align-items:center; }
   .order-row .or-sym{ font-weight:700; }
   .order-row .or-status{ font-size:9px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; }
-  .or-status.pending{ color:var(--amber); } .or-status.filled{ color:var(--green); } .or-status.rejected{ color:var(--red); } .or-status.canceled{ color:var(--dim-2); }
+  .or-status.pending{ color:var(--amber); } .or-status.accepted{ color:var(--green); } .or-status.rejected{ color:var(--red); } .or-status.canceled{ color:var(--dim-2); }
+  .pos-row.closed{ opacity:0.5; }
   .order-row .or-detail{ color:var(--dim); font-size:10px; }
   .strat-modal-card::-webkit-scrollbar{ width:4px; } .strat-modal-card::-webkit-scrollbar-thumb{ background:var(--line); border-radius:2px; }
   .strat-modal-hd{ display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
@@ -138,6 +143,34 @@
   .bf .note{ font-size:9.5px; color:var(--dim-2); line-height:1.4; }
   footer{ display:flex; gap:18px; padding:7px 20px; border-top:1px solid var(--line-soft); background:var(--panel); font-size:10.5px; color:var(--dim-2); flex-shrink:0; }
   footer b{ color:var(--text); font-weight:700; }
+  /* Tabs + Positions view */
+  .tabs{ display:flex; gap:5px; }
+  .tab{ background:var(--panel-2); border:1px solid var(--line); color:var(--dim); font-family:var(--mono); font-size:11px; font-weight:700; letter-spacing:.04em; padding:6px 14px; border-radius:7px; cursor:pointer; transition:.15s; }
+  .tab:hover{ color:var(--text); }
+  .tab.active{ color:var(--text); border-color:var(--green); background:var(--panel); }
+  #positionsView{ flex:1; overflow:auto; padding:14px 18px 20px; }
+  .pos-summary{ display:flex; gap:10px; margin-bottom:14px; }
+  .pos-summary .ptile{ background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px 16px; min-width:150px; }
+  .pos-summary .ptile .lbl{ font-size:9px; letter-spacing:.1em; text-transform:uppercase; color:var(--dim-2); }
+  .pos-summary .ptile .val{ font-size:18px; font-weight:700; font-variant-numeric:tabular-nums; margin-top:3px; }
+  .pos-tables{ display:flex; gap:14px; align-items:flex-start; }
+  .pos-table-wrap{ flex:1; min-width:0; background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .pos-table-scroll{ max-height:82vh; overflow:auto; }
+  table.pos-table{ width:100%; border-collapse:collapse; font-size:10.5px; }
+  table.pos-table th{ position:sticky; top:0; background:var(--panel-2); color:var(--dim-2); font-size:9px; text-transform:uppercase; letter-spacing:.06em; text-align:right; padding:7px 9px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  table.pos-table th.sortable{ cursor:pointer; user-select:none; }
+  table.pos-table th.sortable:hover{ color:var(--text); }
+  table.pos-table th.sort-asc{ color:var(--amber); background:rgba(224,162,51,0.07); }
+  table.pos-table th.sort-desc{ color:var(--amber); background:rgba(224,162,51,0.07); }
+  table.pos-table th.sort-asc::after{ content:" ↑"; }
+  table.pos-table th.sort-desc::after{ content:" ↓"; }
+  .pos-strat-group{ margin-bottom:18px; }
+  .pos-strat-label{ font-size:9px; letter-spacing:.1em; text-transform:uppercase; color:var(--amber); padding:6px 9px 4px; border-bottom:1px solid var(--line-soft); }
+  table.pos-table th:first-child, table.pos-table td:first-child{ text-align:left; }
+  table.pos-table td{ text-align:right; padding:5px 9px; border-bottom:1px solid var(--line-soft); white-space:nowrap; font-variant-numeric:tabular-nums; }
+  table.pos-table tbody tr:hover{ background:var(--panel-2); }
+  table.pos-table td.dim{ color:var(--dim); }
+  .up{ color:var(--green); } .down{ color:var(--red); }
 </style>
 </head>
 <body>
@@ -145,6 +178,10 @@
     <span class="live-dot" id="connDot"></span>
     <span class="title">Nautilus Pipeline</span>
     <span class="conn" id="connTxt">connecting…</span>
+    <div class="tabs">
+      <button class="tab active" data-view="charts" onclick="switchView('charts')">Charts</button>
+      <button class="tab" data-view="positions" onclick="switchView('positions')">Positions</button>
+    </div>
     <div class="addbar">
       <input id="addInput" list="symList" placeholder="add instrument, enter…" autocomplete="off" />
       <datalist id="symList"></datalist>
@@ -152,7 +189,7 @@
     </div>
   </header>
 
-  <div class="body-row">
+  <div class="body-row" id="chartsView">
     <!-- Watchlist -->
     <div class="watch-col">
       <div class="col-head">Instruments</div>
@@ -239,6 +276,32 @@
     </div>
   </div>
 
+  <!-- Positions view -->
+  <div id="positionsView" style="display:none;">
+    <div class="pos-summary" style="align-items:center;">
+      <div class="ptile"><div class="lbl">unrealized pnl</div><div class="val" id="posUnreal">–</div></div>
+      <div class="ptile"><div class="lbl">realized pnl</div><div class="val" id="posReal">–</div></div>
+      <div class="ptile"><div class="lbl">total pnl</div><div class="val" id="posTotal">–</div></div>
+      <div style="display:flex;gap:6px;align-items:center;margin-left:16px;">
+        <button class="tab active" id="posTabOpen" onclick="switchPosTab('open')">Open (<span id="posOpenCount">0</span>)</button>
+        <button class="tab" id="posTabClosed" onclick="switchPosTab('closed')">Closed (<span id="posClosedCount">0</span>)</button>
+      </div>
+      <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
+        <button class="btn" id="byStratBtn" onclick="toggleStratView()">By Strategy</button>
+        <span style="font-size:10px;color:var(--dim-2);">click headers to sort</span>
+      </div>
+    </div>
+    <div id="posByStratView" style="display:none;"></div>
+    <div id="posTablesView">
+      <div id="posOpenPane" class="pos-table-wrap">
+        <div class="pos-table-scroll"><table class="pos-table" id="posOpenTable"></table></div>
+      </div>
+      <div id="posClosedPane" class="pos-table-wrap" style="display:none;">
+        <div class="pos-table-scroll"><table class="pos-table" id="posClosedTable"></table></div>
+      </div>
+    </div>
+  </div>
+
   <footer>
     <span>session <b id="fSession">0s</b></span>
     <span>received <b id="fBytes">0 B</b></span>
@@ -247,7 +310,15 @@
 
 <!-- Strategy drill-down modal -->
 <div id="stratModal" class="strat-modal-backdrop" style="display:none;" onclick="if(event.target===this)closeStratModal()">
-  <div class="orders-panel" id="ordersPanel">
+  <div class="orders-panel" id="openPosPanel">
+    <div class="orders-panel-head">Open Positions</div>
+    <div class="orders-list" id="modalOpenPositions"></div>
+  </div>
+  <div class="orders-panel" id="posHistPanel">
+    <div class="orders-panel-head">Position History</div>
+    <div class="orders-list" id="modalPosHistory"></div>
+  </div>
+  <div class="orders-panel" id="orderHistPanel">
     <div class="orders-panel-head">Order History</div>
     <div class="orders-list" id="ordersList"></div>
   </div>
@@ -266,8 +337,6 @@
     <div id="modalPnl"></div>
     <div class="strat-modal-sec">Live Metrics</div>
     <div id="modalMetrics"></div>
-    <div class="strat-modal-sec">Open Positions</div>
-    <div id="modalPositions"></div>
   </div>
 </div>
 
@@ -296,7 +365,7 @@ function setConn(ok){ document.getElementById("connDot").className="live-dot"+(o
 
 function connectWS(){
   ws = new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host+"/ws");
-  ws.onopen = () => { wsReady=true; setConn(true); for(const s in panels) sub(s, panels[s].window); };
+  ws.onopen = () => { wsReady=true; setConn(true); for(const s in panels) sub(s, panels[s].window); preopenAll(); };
   ws.onclose = () => { wsReady=false; setConn(false); setTimeout(connectWS,1000); };
   ws.onerror = () => { try{ws.close();}catch(e){} };
   ws.onmessage = (e) => {
@@ -509,6 +578,47 @@ function draw(){
   document.getElementById("oscPanel").style.display = (actInds.rsi||actInds.rvi) ? "block" : "none";
   if(isTick) drawLine(ctx,p,w,h,actInds); else drawCandles(ctx,p,w,h,actInds);
 }
+
+// Trade markers: triangle at each fill's avg price/time. Long entry = green (up),
+// short entry = red (down), exit/close = grey. Derived from position data
+// (open + closed) for the active instrument.
+function _tradeMarkers(instrument){
+  const lp=lastPortfolio; if(!lp||!instrument) return [];
+  const out=[];
+  for(const p of (lp.positions||[])){
+    if(p.instrument!==instrument||!p.ts_opened) continue;
+    out.push({t:p.ts_opened/1000, price:p.avg_px, type:p.side==="SHORT"?"short":"long"});
+  }
+  for(const p of (lp.closed_positions||[])){
+    if(p.instrument!==instrument) continue;
+    if(p.ts_opened) out.push({t:p.ts_opened/1000, price:p.avg_px_open, type:p.side==="SHORT"?"short":"long"});
+    if(p.ts_closed) out.push({t:p.ts_closed/1000, price:p.avg_px_close, type:"exit"});
+  }
+  return out;
+}
+function _triMarker(ctx,x,y,size,up,color){
+  ctx.save(); ctx.fillStyle=color; ctx.beginPath();
+  if(up){ ctx.moveTo(x,y); ctx.lineTo(x-size,y+size*1.7); ctx.lineTo(x+size,y+size*1.7); }
+  else  { ctx.moveTo(x,y); ctx.lineTo(x-size,y-size*1.7); ctx.lineTo(x+size,y-size*1.7); }
+  ctx.closePath(); ctx.fill(); ctx.lineWidth=0.6; ctx.strokeStyle="rgba(0,0,0,0.45)"; ctx.stroke();
+  ctx.restore();
+}
+function drawTradeMarkers(ctx,instrument,X,Y,t0,w,ch,snapBars,tfsec){
+  for(const m of _tradeMarkers(instrument)){
+    if(m.t<t0||m.price==null) continue;
+    let t=m.t;
+    if(snapBars&&tfsec){
+      // snap to center of the nearest candle
+      const nearest=snapBars.reduce((best,b)=>Math.abs(b.t+tfsec/2-m.t)<Math.abs(best.t+tfsec/2-m.t)?b:best, snapBars[0]);
+      if(nearest) t=nearest.t+tfsec/2;
+    }
+    const x=X(t); if(x<0||x>w) continue;
+    const y=Y(m.price); if(y<-20||y>ch+20) continue;
+    if(m.type==="long")       _triMarker(ctx,x,y,6,true, getCss("--green"));
+    else if(m.type==="short") _triMarker(ctx,x,y,6,false,getCss("--red"));
+    else                      _triMarker(ctx,x,y,6,false,getCss("--dim-2"));
+  }
+}
 function drawLine(ctx,p,w,h,actInds){
   if(p.ticks.length<2){ showEmpty(true); return; } showEmpty(false);
   const ch=h-AXIS_H;
@@ -534,6 +644,7 @@ function drawLine(ctx,p,w,h,actInds){
       if(actInds.rsi||actInds.rvi) drawOscillator(indData,actInds,t0,wsec,synthBars);
     }
   }
+  drawTradeMarkers(ctx,active,X,Y,t0,w,ch);
   if(mouse){
     const mx=mouse.x, my=mouse.y;
     const hoverT=t0+mx/w*wsec;
@@ -560,8 +671,24 @@ function drawCandles(ctx,p,w,h,actInds){
   if(all.length<1){ showEmpty(true); return; } showEmpty(false);
   const ch=h-AXIS_H;
   const wsec=WINDOW_SEC[p.window]||600;
-  const latest=all[all.length-1].t, t0=latest-wsec-(p.offset||0);
-  const inWin=all.filter(b=>b.t>=t0);
+  const tfsec=TF_SEC[p.timeframe]||60;
+  // Synthesize a live forming bar from ticks since the last closed bar
+  const lastClosed=all[all.length-1];
+  const liveBarT=lastClosed.t+tfsec;
+  const liveTicks=(p.ticks||[]).filter(tk=>tk.t>=liveBarT);
+  let allBars=all;
+  if(liveTicks.length>0){
+    const liveBar={
+      t:liveBarT, live:true,
+      o:liveTicks[0].v, c:liveTicks[liveTicks.length-1].v,
+      h:Math.max(...liveTicks.map(tk=>tk.v)),
+      l:Math.min(...liveTicks.map(tk=>tk.v)),
+      v:liveTicks.reduce((s,tk)=>s+(tk.q||0),0),
+    };
+    allBars=[...all, liveBar];
+  }
+  const latest=allBars[allBars.length-1].t, t0=latest+tfsec/2-wsec-(p.offset||0);
+  const inWin=allBars.filter(b=>b.t>=t0);
   if(!inWin.length){ showEmpty(true); return; }
   let lo=Infinity, hi=-Infinity;
   for(const b of inWin){ if(b.l<lo)lo=b.l; if(b.h>hi)hi=b.h; }
@@ -569,20 +696,23 @@ function drawCandles(ctx,p,w,h,actInds){
   const X=t=>(t-t0)/wsec*w, Y=v=>ch-(v-lo)/(hi-lo)*ch;
   gridY(ctx,w,ch,lo,hi);
   drawXAxis(ctx,w,ch,t0,wsec);
-  const tfsec=TF_SEC[p.timeframe]||60;
   const candlesInView = wsec/tfsec;
-  const cw = Math.max(2, Math.min(18, w/candlesInView*0.7));
+  const cw = Math.max(2, w/candlesInView*0.85);
   const g=getCss("--green"), r=getCss("--red");
   for(const b of inWin){
-    const x=X(b.t), col=b.c>=b.o?g:r;
+    const x=X(b.t + tfsec/2), col=b.c>=b.o?g:r;
+    const alpha=b.live?0.45:1;
+    ctx.globalAlpha=alpha;
     ctx.strokeStyle=col; ctx.fillStyle=col;
     ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(x,Y(b.h)); ctx.lineTo(x,Y(b.l)); ctx.stroke();
     const yo=Y(b.o), yc=Y(b.c), top=Math.min(yo,yc), bh=Math.max(1,Math.abs(yc-yo));
     ctx.fillRect(x-cw/2, top, cw, bh);
+    ctx.globalAlpha=1;
   }
   // Indicator overlays (drawn after candles, before crosshair)
-  if(actInds){ const id=getIndData(p); drawIndicatorOverlay(ctx,id,w,ch,t0,wsec,inWin,lo,hi,actInds);
-    if(actInds.rsi||actInds.rvi) drawOscillator(id,actInds,t0,wsec,inWin); }
+  if(actInds){ const id=getIndData(p); drawIndicatorOverlay(ctx,id,w,ch,t0,wsec,inWin,lo,hi,actInds,tfsec/2);
+    if(actInds.rsi||actInds.rvi) drawOscillator(id,actInds,t0,wsec,inWin,tfsec/2); }
+  drawTradeMarkers(ctx,active,X,Y,t0,w,ch,inWin,tfsec);
   if(mouse){
     const mx=mouse.x, my=mouse.y;
     const hoverT=t0+mx/w*wsec;
@@ -641,6 +771,7 @@ function fmtBytes(b){ if(b<1024) return b+" B"; const k=1024,u=["KB","MB","GB"];
 function fmtPnl(obj){ // {ccy:{realized,unrealized,total}} -> "12.34 USDT"
   const parts=[]; for(const [ccy,v] of Object.entries(obj||{})) parts.push((v>=0?"+":"")+v.toFixed(2)+" "+ccy); return parts.length?parts.join("  "):"–"; }
 function pnlClass(v){ return v>0?"up":(v<0?"down":""); }
+function fmtSigned(v){ v=v||0; return (v>=0?"+":"")+v.toFixed(2); }
 function fmtMetric(v){
   if(typeof v==="number"){ if(!isFinite(v)) return String(v); const a=Math.abs(v);
     return a>=1000?v.toFixed(2):(a>=1?v.toFixed(4):v.toPrecision(5)); }
@@ -649,6 +780,11 @@ function fmtMetric(v){
 
 let lastPortfolio = null;
 let activeModal = null;
+// Position add/remove flash tracking for the open modal (by position id).
+let _prevOpenIds = new Set(), _prevClosedIds = new Set();
+let _flashOpen = {}, _flashClosed = {}, _flashSummary = 0, _modalSeeded = false;
+const FLASH_MS = 500;   // match the watchlist symbol flash (.flash-up/.flash-down: .5s)
+function _resetPosFlash(){ _prevOpenIds=new Set(); _prevClosedIds=new Set(); _flashOpen={}; _flashClosed={}; _flashSummary=0; _modalSeeded=false; }
 const orderState = {};   // stratId -> {pending: N}
 const orderHistory = {}; // stratId -> [{instrument, side, qty, status, ts}]
 const MAX_ORDER_HISTORY = 100;
@@ -679,6 +815,164 @@ function onPortfolio(m){
   }
   // Refresh modal if open
   if(activeModal) _populateModal(activeModal);
+  // Refresh the Positions tab if it's the active view
+  if(document.getElementById("positionsView").style.display!=="none") renderPositions();
+}
+
+// ---------- Positions tab ----------
+let _posOpenSort = {col:null, dir:1};
+let _posClosedSort = {col:null, dir:1};
+let _posByStrategy = false;
+let _posActiveTab = "open";
+
+function switchPosTab(tab){
+  _posActiveTab = tab;
+  document.getElementById("posTabOpen").classList.toggle("active", tab==="open");
+  document.getElementById("posTabClosed").classList.toggle("active", tab==="closed");
+  document.getElementById("posOpenPane").style.display = tab==="open" ? "block" : "none";
+  document.getElementById("posClosedPane").style.display = tab==="closed" ? "block" : "none";
+}
+
+function toggleStratView(){
+  _posByStrategy = !_posByStrategy;
+  const btn = document.getElementById("byStratBtn");
+  btn.style.borderColor = _posByStrategy ? "var(--amber)" : "";
+  btn.style.color = _posByStrategy ? "var(--amber)" : "";
+  document.getElementById("posTablesView").style.display = _posByStrategy ? "none" : "block";
+  document.getElementById("posByStratView").style.display = _posByStrategy ? "block" : "none";
+  renderPositions();
+}
+
+function sortPos(table, col){
+  const s = table==="open" ? _posOpenSort : _posClosedSort;
+  if(s.col===col) s.dir *= -1; else { s.col=col; s.dir=1; }
+  renderPositions();
+}
+
+function _applySortOpen(rows, now){
+  const s=_posOpenSort; if(!s.col) return rows;
+  const key = {symbol:p=>p.instrument, strategy:p=>p.strategy||"", side:p=>p.side,
+    qty:p=>p.qty||0, entry:p=>p.ts_opened||0, entry_px:p=>p.avg_px||0,
+    upnl:p=>p.unrealized||0, rpnl:p=>p.realized||0, hold:p=>now-(p.ts_opened||0)}[s.col];
+  if(!key) return rows;
+  return [...rows].sort((a,b)=>{ const av=key(a),bv=key(b); return (av<bv?-1:av>bv?1:0)*s.dir; });
+}
+
+function _applySortClosed(rows){
+  const s=_posClosedSort; if(!s.col) return rows;
+  const key = {symbol:p=>p.instrument, strategy:p=>p.strategy||"", side:p=>p.side,
+    qty:p=>p.qty||0, entry:p=>p.ts_opened||0, exit:p=>p.ts_closed||0,
+    entry_px:p=>p.avg_px_open||0, exit_px:p=>p.avg_px_close||0,
+    pnl:p=>p.realized||0, hold:p=>(p.ts_closed||0)-(p.ts_opened||0)}[s.col];
+  if(!key) return rows;
+  return [...rows].sort((a,b)=>{ const av=key(a),bv=key(b); return (av<bv?-1:av>bv?1:0)*s.dir; });
+}
+
+function _thOpen(label, col){
+  const s=_posOpenSort;
+  const cls="sortable"+(s.col===col?(s.dir===1?" sort-asc":" sort-desc"):"");
+  return `<th class="${cls}" onclick="sortPos('open','${col}')">${label}</th>`;
+}
+function _thClosed(label, col){
+  const s=_posClosedSort;
+  const cls="sortable"+(s.col===col?(s.dir===1?" sort-asc":" sort-desc"):"");
+  return `<th class="${cls}" onclick="sortPos('closed','${col}')">${label}</th>`;
+}
+
+function _openTableHTML(open, now){
+  const sideCls=s=>s==="LONG"?"up":(s==="SHORT"?"down":"");
+  const head=`<thead><tr>
+    ${_thOpen("Symbol","symbol")}${_thOpen("Strategy","strategy")}${_thOpen("Side","side")}
+    ${_thOpen("Qty","qty")}${_thOpen("Entry","entry")}${_thOpen("Entry Px","entry_px")}
+    ${_thOpen("uPnL","upnl")}${_thOpen("rPnL","rpnl")}${_thOpen("Hold(m)","hold")}
+  </tr></thead>`;
+  const rows=_applySortOpen(open,now).map(p=>`<tr>
+    <td><b>${p.instrument.split(".")[0]}</b></td><td class="dim">${_stratShort(p.strategy)}</td>
+    <td class="${sideCls(p.side)}">${p.side}</td><td>${fmtQty(p.qty)}</td>
+    <td class="dim">${_fmtDT(p.ts_opened)}</td><td>${fmt(p.avg_px)}</td>
+    <td class="${pnlClass(p.unrealized)}">${fmtSigned(p.unrealized)}</td>
+    <td class="${pnlClass(p.realized)}">${fmtSigned(p.realized)}</td>
+    <td>${_holdMin(p.ts_opened,now)}</td></tr>`).join("")
+    || `<tr><td colspan="9" class="dim" style="text-align:center;padding:12px;">no open positions</td></tr>`;
+  return head+"<tbody>"+rows+"</tbody>";
+}
+
+function _closedTableHTML(closed){
+  const sideCls=s=>s==="LONG"?"up":(s==="SHORT"?"down":"");
+  const head=`<thead><tr>
+    ${_thClosed("Symbol","symbol")}${_thClosed("Strategy","strategy")}${_thClosed("Side","side")}
+    ${_thClosed("Qty","qty")}${_thClosed("Entry","entry")}${_thClosed("Exit","exit")}
+    ${_thClosed("Entry Px","entry_px")}${_thClosed("Exit Px","exit_px")}
+    ${_thClosed("PnL","pnl")}${_thClosed("Hold(m)","hold")}
+  </tr></thead>`;
+  const rows=_applySortClosed(closed).map(p=>`<tr>
+    <td><b>${p.instrument.split(".")[0]}</b></td><td class="dim">${_stratShort(p.strategy)}</td>
+    <td class="${sideCls(p.side)}">${p.side}</td><td>${fmtQty(p.qty)}</td>
+    <td class="dim">${_fmtDT(p.ts_opened)}</td><td class="dim">${_fmtDT(p.ts_closed)}</td>
+    <td>${fmt(p.avg_px_open)}</td><td>${fmt(p.avg_px_close)}</td>
+    <td class="${pnlClass(p.realized)}">${fmtSigned(p.realized)} ${p.ccy||""}</td>
+    <td>${_holdMin(p.ts_opened,p.ts_closed)}</td></tr>`).join("")
+    || `<tr><td colspan="10" class="dim" style="text-align:center;padding:12px;">no closed positions</td></tr>`;
+  return head+"<tbody>"+rows+"</tbody>";
+}
+
+function switchView(view){
+  document.getElementById("chartsView").style.display = view==="positions"?"none":"flex";
+  document.getElementById("positionsView").style.display = view==="positions"?"block":"none";
+  document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active", t.dataset.view===view));
+  if(view==="positions") renderPositions();
+  else render();   // chart may need a redraw after being hidden
+}
+function _fmtDT(ms){
+  if(!ms) return "–";
+  const d=new Date(ms), p=n=>String(n).padStart(2,"0");
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+function _holdMin(a,b){ if(!a||!b) return "–"; const s=Math.floor((b-a)/1000); const m=Math.floor(s/60); const sec=s%60; return m>0?`${m}m ${sec}s`:`${sec}s`; }
+function _stratShort(s){ return (s||"").replace(/-None$/,""); }
+function renderPositions(){
+  const m=lastPortfolio; if(!m) return;
+  const open=(m.positions||[]).slice();
+  const closed=(m.closed_positions||[]).slice();
+  // Summary PnL
+  let uReal=0, real=0, ccy="";
+  for(const p of open){ uReal+=p.unrealized||0; real+=p.realized||0; if(!ccy)ccy=p.ccy; }
+  for(const p of closed){ real+=p.realized||0; if(!ccy)ccy=p.ccy; }
+  const total=uReal+real, cc=ccy||"USDT";
+  const setT=(id,v)=>{ const el=document.getElementById(id); el.textContent=fmtSigned(v)+" "+cc; el.className="val "+pnlClass(v); };
+  setT("posUnreal",uReal); setT("posReal",real); setT("posTotal",total);
+  document.getElementById("posOpenCount").textContent=open.length;
+  document.getElementById("posClosedCount").textContent=closed.length;
+  const now=Date.now();
+
+  if(_posByStrategy){
+    // Group by strategy
+    const strats=new Set([...open.map(p=>p.strategy||""), ...closed.map(p=>p.strategy||"")]);
+    let html="";
+    for(const sid of [...strats].sort()){
+      const sOpen=open.filter(p=>(p.strategy||"")=== sid);
+      const sClosed=closed.filter(p=>(p.strategy||"")=== sid);
+      let sUnreal=0, sReal=0;
+      for(const p of sOpen){ sUnreal+=p.unrealized||0; sReal+=p.realized||0; }
+      for(const p of sClosed){ sReal+=p.realized||0; }
+      const sTotal=sUnreal+sReal;
+      html+=`<div class="pos-strat-group">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+          <span class="pos-strat-label">${_stratShort(sid)}</span>
+          <span style="font-size:10px;color:var(--dim);">open <b>${sOpen.length}</b> · closed <b>${sClosed.length}</b></span>
+          <span style="font-size:10px;margin-left:auto;" class="${pnlClass(sTotal)}">total ${fmtSigned(sTotal)} ${cc}</span>
+        </div>
+        <div class="pos-tables" style="margin-bottom:0;">
+          <div class="pos-table-wrap"><div class="pos-table-scroll"><table class="pos-table">${_openTableHTML(sOpen,now)}</table></div></div>
+          <div class="pos-table-wrap"><div class="pos-table-scroll"><table class="pos-table">${_closedTableHTML(sClosed)}</table></div></div>
+        </div>
+      </div>`;
+    }
+    document.getElementById("posByStratView").innerHTML=html||'<div style="color:var(--dim-2);padding:20px;">no positions</div>';
+  } else {
+    document.getElementById("posOpenTable").innerHTML=_openTableHTML(open,now);
+    document.getElementById("posClosedTable").innerHTML=_closedTableHTML(closed);
+  }
 }
 
 function onOrderEvent(m){
@@ -688,30 +982,19 @@ function onOrderEvent(m){
   const state=orderState[sid];
   const hist=orderHistory[sid];
 
+  // Rolling per-order log: each order starts pending, then becomes accepted or
+  // rejected, and stays in the list.
   if(m.status==="submitted"){
     state.pending=Math.max(0,state.pending+1);
+    hist.unshift({instrument:m.instrument,side:m.side,qty:m.qty,price:m.price,status:"pending",ts:m.ts});
+    if(hist.length>MAX_ORDER_HISTORY) hist.length=MAX_ORDER_HISTORY;
   } else {
     state.pending=Math.max(0,state.pending-1);
-  }
-
-  // Build round-trip trades from fills: a BUY opens a row; the matching SELL
-  // closes that same row (grays out, shows realized PnL = (out-in)*qty).
-  if(m.status==="filled"){
-    const px=parseFloat(m.price)||0;
-    const qty=parseFloat(m.qty)||0;
-    if(m.side==="BUY"){
-      hist.unshift({instrument:m.instrument,qty,entryPx:px,entryTs:m.ts,status:"open",exitPx:null,exitTs:null,pnl:null});
-      if(hist.length>MAX_ORDER_HISTORY) hist.length=MAX_ORDER_HISTORY;
-    } else if(m.side==="SELL"){
-      const t=hist.find(o=>o.instrument===m.instrument&&o.status==="open");
-      if(t){
-        t.exitPx=px; t.exitTs=m.ts; t.status="closed";
-        t.pnl=(px-t.entryPx)*t.qty;
-      } else {
-        hist.unshift({instrument:m.instrument,qty,entryPx:null,entryTs:null,status:"closed",exitPx:px,exitTs:m.ts,pnl:null});
-        if(hist.length>MAX_ORDER_HISTORY) hist.length=MAX_ORDER_HISTORY;
-      }
-    }
+    const st = m.status==="filled" ? "accepted" : m.status;  // rejected / canceled kept as-is
+    const entry=hist.find(o=>o.instrument===m.instrument && o.status==="pending");
+    if(entry){ entry.status=st; if(m.price) entry.price=m.price; if(m.side) entry.side=m.side; }
+    else { hist.unshift({instrument:m.instrument,side:m.side,qty:m.qty,price:m.price,status:st,ts:m.ts});
+           if(hist.length>MAX_ORDER_HISTORY) hist.length=MAX_ORDER_HISTORY; }
   }
 
   const safe=sid.replace(/[^a-zA-Z0-9]/g,"_");
@@ -728,34 +1011,29 @@ function onOrderEvent(m){
 function _renderOrdersList(sid){
   const el=document.getElementById("ordersList"); if(!el) return;
   const hist=orderHistory[sid]||[];
-  if(!hist.length){ el.innerHTML='<div style="color:var(--dim-2);font-size:10.5px;padding:6px 4px;">no orders yet</div>'; return; }
+  if(!hist.length){ el.innerHTML='<div class="pos-empty">no orders yet</div>'; return; }
   el.innerHTML=hist.map(o=>{
     const sym=o.instrument.split(".")[0];
-    const closed=o.status==="closed";
-    const tm=(ts)=>ts?new Date(ts*1000).toLocaleTimeString("en-GB",{hour12:false}):"";
-    const inStr=o.entryPx!=null?fmt(o.entryPx):"–";
-    const outStr=o.exitPx!=null?fmt(o.exitPx):"–";
-    let pnlHtml="";
-    if(o.pnl!=null){
-      const cls=o.pnl>=0?"up":"down";
-      pnlHtml=`&nbsp;·&nbsp;<span class="${cls}">${(o.pnl>=0?"+":"")+o.pnl.toFixed(2)}</span>`;
-    }
-    return `<div class="order-row status-${o.status}" style="${closed?'opacity:0.5;':''}">
-      <div class="or-top"><span class="or-sym">${sym}</span><span class="or-status ${o.status}">${closed?'closed':'open'}</span></div>
-      <div class="or-detail">qty ${fmtQty(o.qty)} &nbsp;·&nbsp; in ${inStr}${closed?` → out ${outStr}`:''}${pnlHtml}</div>
-      <div class="or-detail" style="color:var(--dim-2);">${tm(o.entryTs)}${closed?` → ${tm(o.exitTs)}`:''}</div>
+    const sideCls=o.side==="BUY"?"up":(o.side==="SELL"?"down":"");
+    const t=o.ts?new Date(o.ts*1000).toLocaleTimeString("en-GB",{hour12:false}):"";
+    const px=o.price?parseFloat(o.price):null;
+    return `<div class="order-row status-${o.status}">
+      <div class="or-top"><span class="or-sym">${sym}</span><span class="or-status ${o.status}">${o.status}</span></div>
+      <div class="or-detail"><span class="${sideCls}">${o.side||"–"}</span> ${o.qty?fmtQty(parseFloat(o.qty)):"–"}${px!=null?" @ "+fmt(px):""} &nbsp;·&nbsp; ${t}</div>
     </div>`;
   }).join("");
 }
 
 async function stratCmd(action){
   if(!activeModal) return;
+  // Position-history CSV is written server-side by the node on close_strategy.
   await fetch("/api/command",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({action, strategy_id:activeModal})});
 }
 
 function openStratModal(stratId){
   activeModal=stratId;
+  _resetPosFlash();   // don't flash existing positions on open
   _populateModal(stratId);
   _renderOrdersList(stratId);
   document.getElementById("stratModal").style.display="flex";
@@ -769,16 +1047,32 @@ function closeStratModal(){
 function _populateModal(stratId){
   const m=lastPortfolio; if(!m) return;
   const metrics=(m.metrics||{})[stratId]||{};
-  const positions=(m.positions||[]).filter(p=>p.strategy===stratId);
+  const positions=(m.positions||[]).filter(p=>p.strategy===stratId).sort((a,b)=>(b.ts_opened||0)-(a.ts_opened||0));
+  const closed=(m.closed_positions||[]).filter(p=>p.strategy===stratId);
+  // Detect newly-opened / newly-closed positions (by id) and arm flashes.
+  const _now=Date.now();
+  const curOpen=new Set(positions.map(p=>p.id));
+  const curClosed=new Set(closed.map(p=>p.id));
+  if(_modalSeeded){
+    for(const id of curOpen){ if(!_prevOpenIds.has(id)){ _flashOpen[id]=_now+FLASH_MS; _flashSummary=_now+FLASH_MS; } }
+    for(const id of curClosed){ if(!_prevClosedIds.has(id)){ _flashClosed[id]=_now+FLASH_MS; } }
+  } else { _modalSeeded=true; }
+  _prevOpenIds=curOpen; _prevClosedIds=curClosed;
   document.getElementById("modalStratName").textContent=stratId;
   document.getElementById("modalDesc").textContent=metrics.description||"No description available.";
-  // Per-strategy PnL: sum from open positions
+  // Per-strategy PnL: unrealized from open positions; realized from open
+  // (partial closes) plus fully-closed positions.
   const byCtcy={};
   for(const p of positions){
     const ccy=p.ccy||"USDT";
     if(!byCtcy[ccy]) byCtcy[ccy]={realized:0,unrealized:0};
     byCtcy[ccy].realized+=p.realized||0;
     byCtcy[ccy].unrealized+=p.unrealized||0;
+  }
+  for(const p of closed){
+    const ccy=p.ccy||"USDT";
+    if(!byCtcy[ccy]) byCtcy[ccy]={realized:0,unrealized:0};
+    byCtcy[ccy].realized+=p.realized||0;
   }
   const pnlEl=document.getElementById("modalPnl");
   if(Object.keys(byCtcy).length){
@@ -814,26 +1108,54 @@ function _populateModal(stratId){
     html+=`<div style="grid-column:1/-1;margin-top:4px;"><div style="color:var(--dim);font-size:10px;margin-bottom:2px;">EMAs (fast vs slow)</div>${rows}</div>`;
   }
   metricsEl.innerHTML=html||'<div style="color:var(--dim-2);font-size:10.5px;padding:2px 0 6px;">no metrics yet</div>';
-  // Positions
-  const posEl=document.getElementById("modalPositions");
+  // Open positions (left): live unrealized + realized per position.
+  const openEl=document.getElementById("modalOpenPositions");
   if(positions.length){
-    posEl.innerHTML=positions.map(p=>{
+    openEl.innerHTML=positions.map(p=>{
       const sideCls=p.side==="LONG"?"up":(p.side==="SHORT"?"down":"");
-      const upCls=pnlClass(p.unrealized);
       const sym=p.instrument.split(".")[0];
       const symPanel=panels[p.instrument];
       const livePx=symPanel&&symPanel.ticks.length?symPanel.ticks[symPanel.ticks.length-1].v:null;
       const lastPx=livePx??((lastPortfolio.prices||{})[p.instrument]??null);
       const posVal=(p.value!=null)?p.value:(lastPx!=null?p.qty*lastPx:null);
-      return `<div style="border:1px solid var(--line-soft);border-radius:6px;padding:6px 8px;margin-bottom:6px;font-size:10.5px;">
+      const fl=(_flashOpen[p.id]&&_now<_flashOpen[p.id])?" flash-add":"";
+      return `<div class="pos-row${fl}">
         <div style="display:flex;justify-content:space-between;"><b>${sym}</b><span class="${sideCls}">${p.side} ${fmtQty(p.qty)}</span></div>
-        <div style="display:flex;justify-content:space-between;color:var(--dim);margin-top:3px;"><span>avg ${fmt(p.avg_px)}</span><span class="${upCls}">${(p.unrealized>=0?"+":"")+p.unrealized.toFixed(2)} ${p.ccy}</span></div>
-        <div style="display:flex;justify-content:space-between;color:var(--dim);margin-top:2px;"><span>value</span><span style="color:var(--text)">${posVal!=null?"$"+posVal.toFixed(2):"–"}</span></div>
+        <div style="display:flex;justify-content:space-between;color:var(--dim);margin-top:3px;"><span>avg ${fmt(p.avg_px)}</span><span style="color:var(--text)">${posVal!=null?"$"+posVal.toFixed(2):"–"}</span></div>
+        <div style="display:flex;justify-content:space-between;margin-top:3px;"><span class="${pnlClass(p.unrealized)}">uPnL ${fmtSigned(p.unrealized)}</span><span class="${pnlClass(p.realized)}">rPnL ${fmtSigned(p.realized)} ${p.ccy}</span></div>
       </div>`;
     }).join("");
   } else {
-    posEl.innerHTML='<div style="color:var(--dim-2);font-size:10.5px;padding:2px 0 6px;">no open positions</div>';
+    openEl.innerHTML='<div class="pos-empty">no open positions</div>';
   }
+  // Position History: open positions collapsed into one summary box (count +
+  // total realized/unrealized); closed positions listed below, grayed, with
+  // in/out price + realized.
+  const histEl=document.getElementById("modalPosHistory");
+  let openHtml="";
+  if(positions.length){
+    let oReal=0, oUnreal=0, oCcy="";
+    for(const p of positions){ oReal+=p.realized||0; oUnreal+=p.unrealized||0; if(!oCcy)oCcy=p.ccy; }
+    const oTotal=oReal+oUnreal;
+    const sumFl=(_flashSummary&&_now<_flashSummary)?" flash-add":"";
+    openHtml=`<div class="pos-row${sumFl}" style="${sumFl?"":"border-color:var(--line);"}">
+      <div style="display:flex;justify-content:space-between;"><b>Open Positions</b><span>${positions.length}</span></div>
+      <div style="display:flex;justify-content:space-between;margin-top:3px;"><span class="${pnlClass(oUnreal)}">uPnL ${fmtSigned(oUnreal)}</span><span class="${pnlClass(oReal)}">rPnL ${fmtSigned(oReal)}</span></div>
+      <div style="display:flex;justify-content:space-between;margin-top:3px;"><span style="color:var(--dim-2);">total</span><span class="${pnlClass(oTotal)}">${fmtSigned(oTotal)} ${oCcy||"USDT"}</span></div>
+    </div>`;
+  }
+  const closedHtml=closed.map(p=>{
+    const sideCls=p.side==="LONG"?"up":(p.side==="SHORT"?"down":"");
+    const sym=p.instrument.split(".")[0];
+    const t=p.ts_closed?new Date(p.ts_closed).toLocaleTimeString("en-GB",{hour12:false}):"";
+    const fl=(_flashClosed[p.id]&&_now<_flashClosed[p.id])?" flash-del":"";
+    return `<div class="pos-row closed${fl}">
+      <div style="display:flex;justify-content:space-between;"><b>${sym}</b><span class="${sideCls}">${p.side} ${fmtQty(p.qty)}</span></div>
+      <div style="display:flex;justify-content:space-between;color:var(--dim);margin-top:3px;"><span>in ${fmt(p.avg_px_open)} → out ${fmt(p.avg_px_close)}</span></div>
+      <div style="display:flex;justify-content:space-between;margin-top:3px;"><span style="color:var(--dim-2);">${t}</span><span class="${pnlClass(p.realized)}">${fmtSigned(p.realized)} ${p.ccy}</span></div>
+    </div>`;
+  }).join("");
+  histEl.innerHTML=(openHtml+closedHtml)||'<div class="pos-empty">no positions yet</div>';
 }
 
 // ---------- indicators ----------
@@ -874,14 +1196,15 @@ function drawLine_pts(ctx, pts) {
   ctx.stroke();
 }
 
-function drawIndicatorOverlay(ctx, indData, w, ch, t0, wsec, inWin, lo, hi, actInds) {
+function drawIndicatorOverlay(ctx, indData, w, ch, t0, wsec, inWin, lo, hi, actInds, tshift=0) {
   if (!Object.keys(indData).length) return;
   const X = t=>(t-t0)/wsec*w, Y = v=>ch-(v-lo)/(hi-lo)*ch;
+  const Xb = b => X(b.t + tshift);
 
   // BB cloud area (first — behind candles visually)
   if (actInds.bb) {
     const uPts=[], lPts=[];
-    for (const b of inWin) { const s=indData[b.t]; if(!s||s.bb_upper==null) continue; uPts.push([X(b.t),Y(s.bb_upper)]); lPts.push([X(b.t),Y(s.bb_lower)]); }
+    for (const b of inWin) { const s=indData[b.t]; if(!s||s.bb_upper==null) continue; uPts.push([Xb(b),Y(s.bb_upper)]); lPts.push([Xb(b),Y(s.bb_lower)]); }
     if (uPts.length) {
       ctx.save();
       ctx.fillStyle="rgba(79,157,222,0.07)";
@@ -898,7 +1221,7 @@ function drawIndicatorOverlay(ctx, indData, w, ch, t0, wsec, inWin, lo, hi, actI
   // Ichimoku cloud (span_a / span_b shaded area + tenkan/kijun lines)
   if (actInds.ichi) {
     const aPts=[], bPts=[];
-    for (const b of inWin) { const s=indData[b.t]; if(!s||s.ichi_span_a==null) continue; aPts.push([X(b.t),Y(s.ichi_span_a)]); bPts.push([X(b.t),Y(s.ichi_span_b)]); }
+    for (const b of inWin) { const s=indData[b.t]; if(!s||s.ichi_span_a==null) continue; aPts.push([Xb(b),Y(s.ichi_span_a)]); bPts.push([Xb(b),Y(s.ichi_span_b)]); }
     if (aPts.length) {
       ctx.save();
       ctx.fillStyle="rgba(144,202,249,0.09)";
@@ -911,7 +1234,7 @@ function drawIndicatorOverlay(ctx, indData, w, ch, t0, wsec, inWin, lo, hi, actI
       ctx.restore();
     }
     [["ichi_tenkan","#ef5350"],["ichi_kijun","#42a5f5"]].forEach(([key,color])=>{
-      const pts=inWin.map(b=>{const s=indData[b.t];return s&&s[key]!=null?[X(b.t),Y(s[key])]:null;}).filter(Boolean);
+      const pts=inWin.map(b=>{const s=indData[b.t];return s&&s[key]!=null?[Xb(b),Y(s[key])]:null;}).filter(Boolean);
       if(pts.length){ctx.save();ctx.strokeStyle=color;ctx.lineWidth=1;drawLine_pts(ctx,pts);ctx.restore();}
     });
   }
@@ -920,13 +1243,13 @@ function drawIndicatorOverlay(ctx, indData, w, ch, t0, wsec, inWin, lo, hi, actI
   [[actInds.sma,"sma","#4f9dde",1.5],[actInds.ema,"ema","#a855f7",1.5],
    [actInds.vwap,"vwap","#e0a233",1.5],[actInds.bb,"bb_mid","rgba(79,157,222,0.55)",1]]
   .filter(([on])=>on).forEach(([,key,color,lw])=>{
-    const pts=inWin.map(b=>{const s=indData[b.t];return s&&s[key]!=null?[X(b.t),Y(s[key])]:null;}).filter(Boolean);
+    const pts=inWin.map(b=>{const s=indData[b.t];return s&&s[key]!=null?[Xb(b),Y(s[key])]:null;}).filter(Boolean);
     if(!pts.length) return;
     ctx.save(); ctx.strokeStyle=color; ctx.lineWidth=lw; drawLine_pts(ctx,pts); ctx.restore();
   });
 }
 
-function drawOscillator(indData, actInds, t0, wsec, inWin) {
+function drawOscillator(indData, actInds, t0, wsec, inWin, tshift=0) {
   const cv=document.getElementById("oscChart"); if(!cv) return;
   const dpr=window.devicePixelRatio||1, w=cv.clientWidth, h=cv.clientHeight;
   cv.width=w*dpr; cv.height=h*dpr;
@@ -942,6 +1265,7 @@ function drawOscillator(indData, actInds, t0, wsec, inWin) {
   if(actInds.rsi){lo=Math.min(lo,0);hi=Math.max(hi,100);}
   const pad=(hi-lo)*0.08||4; lo-=pad; hi+=pad;
   const X=t=>(t-t0)/wsec*w, Y=v=>h-(v-lo)/(hi-lo)*h;
+  const Xb=b=>X(b.t+tshift);
   // Reference bands
   if(actInds.rsi){
     ctx.save(); ctx.strokeStyle="rgba(90,96,107,0.3)"; ctx.lineWidth=1; ctx.setLineDash([3,5]);
@@ -954,12 +1278,12 @@ function drawOscillator(indData, actInds, t0, wsec, inWin) {
   }
   // RSI purple
   if(hasRsi){
-    const pts=inWin.map(b=>{const s=indData[b.t];return s&&s.rsi!=null?[X(b.t),Y(s.rsi)]:null;}).filter(Boolean);
+    const pts=inWin.map(b=>{const s=indData[b.t];return s&&s.rsi!=null?[Xb(b),Y(s.rsi)]:null;}).filter(Boolean);
     ctx.save(); ctx.strokeStyle="#a855f7"; ctx.lineWidth=1.5; drawLine_pts(ctx,pts); ctx.restore();
   }
   // RVI teal
   if(hasRvi){
-    const pts=inWin.map(b=>{const s=indData[b.t];return s&&s.rvi!=null?[X(b.t),Y(s.rvi)]:null;}).filter(Boolean);
+    const pts=inWin.map(b=>{const s=indData[b.t];return s&&s.rvi!=null?[Xb(b),Y(s.rvi)]:null;}).filter(Boolean);
     ctx.save(); ctx.strokeStyle="#26a69a"; ctx.lineWidth=1.5; drawLine_pts(ctx,pts); ctx.restore();
   }
   // Labels
