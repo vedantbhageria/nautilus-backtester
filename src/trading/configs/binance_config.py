@@ -100,8 +100,14 @@ config_node = TradingNodeConfig(
 
     exec_clients={
         BINANCE_FUTURES: SandboxExecutionClientConfig(
-        venue=BINANCE_FUTURES,
-        starting_balances=["100000 USDT"],
+            venue=BINANCE_FUTURES,
+            starting_balances=["100000 USDT"],
+            # Match orders against the quote book only. Quotes (bookTicker) and
+            # trades (aggTrade) arrive from separate Binance streams with slightly
+            # different timestamps; feeding both makes the matching engine log
+            # "Skipping stale trade" for out-of-order trades. The strategy feeds
+            # quotes for fills, so trades aren't needed for execution.
+            trade_execution=False,
         ),
     },
     timeout_connection=30.0,
@@ -111,11 +117,13 @@ config_node = TradingNodeConfig(
     timeout_post_stop=30.0,
 )
 
-"""        BINANCE_FUTURES: BinanceExecClientConfig(
+"""       
+         BINANCE_FUTURES: BinanceExecClientConfig(
             venue=Venue(BINANCE_FUTURES),
             account_type=BinanceAccountType.USDT_FUTURES,
             environment=BinanceEnvironment.DEMO,
             instrument_provider=BinanceInstrumentProviderConfig(
                 load_all=True,
             ),
-        ),"""
+        ),
+"""

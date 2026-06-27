@@ -22,6 +22,7 @@ COMMAND_STREAM = "dashboard:commands"
 PORTFOLIO_KEY = "dashboard:portfolio"
 STRATEGY_SET = "dashboard:strategies"
 INDICATORS_PREFIX = "dashboard:indicators:"
+OVERALL_PNL_KEY = "dashboard:overall_pnl"   # persisted cumulative realized PnL across sessions
 
 
 class ControlActorConfig(ActorConfig, frozen=True):
@@ -39,6 +40,9 @@ class ControlActor(Actor):
         # Closed positions copied out of the cache before it purges them (~1 min),
         # so the dashboard's closed-positions list stays stable. position_id -> record.
         self._closed_positions: dict[str, dict] = {}
+        # Cumulative realized PnL banked from previous sessions (by currency).
+        # The displayed "overall PnL" = this base + the current session's realized.
+        self._overall_base: dict[str, float] = {}
 
     def on_start(self) -> None:
         try:
@@ -48,6 +52,20 @@ class ControlActor(Actor):
             )
             last = self._redis.xrevrange(self.config.command_stream, count=1)
             self._cmd_cursor = last[0][0] if last else "0-0"
+            # Restore closed positions from Redis so markers survive node restarts.
+            try:
+                raw = self._redis.get("dashboard:closed_positions")
+                if raw:
+                    self._closed_positions = json.loads(raw)
+            except Exception:
+                pass
+            # Load the persisted cross-session overall PnL as this session's base.
+            try:
+                raw = self._redis.get(OVERALL_PNL_KEY)
+                if raw:
+                    self._overall_base = {k: float(v) for k, v in json.loads(raw).items()}
+            except Exception:
+                self._overall_base = {}
             self.clock.set_timer(
                 name="poll_commands",
                 interval=timedelta(milliseconds=self.config.command_poll_ms),
@@ -135,6 +153,16 @@ class ControlActor(Actor):
                 d["realized"] += c["realized"]
             for v in pnl.values():
                 v["total"] = v["realized"] + v["unrealized"]
+            # Overall (cross-session) PnL = persisted base + this session's realized.
+            # Written back each tick so on the next restart it becomes the new base
+            # (the session's realized PnL is "banked"). Session PnL stays in `pnl`.
+            overall: dict[str, float] = dict(self._overall_base)
+            for ccy, v in pnl.items():
+                overall[ccy] = self._overall_base.get(ccy, 0.0) + v["realized"]
+            try:
+                self._redis.set(OVERALL_PNL_KEY, json.dumps(overall))
+            except Exception:
+                pass
             try:
                 names = set(self._redis.smembers(STRATEGY_SET) or [])
             except Exception:
@@ -146,8 +174,12 @@ class ControlActor(Actor):
                 "closed_positions": closed_positions,
                 "prices": prices,
                 "pnl": pnl,
+                "overall_pnl": overall,
             }
             self._redis.set(PORTFOLIO_KEY, json.dumps(snap))
+            # Persist closed positions separately so they survive node restarts.
+            if self._closed_positions:
+                self._redis.set("dashboard:closed_positions", json.dumps(self._closed_positions))
         except Exception as e:
             self.log.error(f"Portfolio snapshot failed: {e}")
 

@@ -248,7 +248,8 @@
         <div class="panel-head">Portfolio PnL</div>
         <div class="tile"><span class="lbl">unrealized</span><span class="val" id="pnlUnreal">–</span></div>
         <div class="tile"><span class="lbl">realized</span><span class="val" id="pnlReal">–</span></div>
-        <div class="tile"><span class="lbl">total pnl</span><span class="val" id="pnlTotal">–</span></div>
+        <div class="tile"><span class="lbl">session pnl</span><span class="val" id="pnlTotal">–</span></div>
+        <div class="tile"><span class="lbl">overall pnl</span><span class="val" id="pnlOverall">–</span></div>
         <div class="panel-head" style="padding-top:2px;">Active Strategies</div>
         <div id="stratList" style="padding:0 0 8px;"><div style="color:var(--dim-2);font-size:10.5px;padding:4px 11px;">no active strategies</div></div>
       </div>
@@ -281,7 +282,8 @@
     <div class="pos-summary" style="align-items:center;">
       <div class="ptile"><div class="lbl">unrealized pnl</div><div class="val" id="posUnreal">–</div></div>
       <div class="ptile"><div class="lbl">realized pnl</div><div class="val" id="posReal">–</div></div>
-      <div class="ptile"><div class="lbl">total pnl</div><div class="val" id="posTotal">–</div></div>
+      <div class="ptile"><div class="lbl">session pnl</div><div class="val" id="posTotal">–</div></div>
+      <div class="ptile"><div class="lbl">overall pnl</div><div class="val" id="posOverall">–</div></div>
       <div style="display:flex;gap:6px;align-items:center;margin-left:16px;">
         <button class="tab active" id="posTabOpen" onclick="switchPosTab('open')">Open (<span id="posOpenCount">0</span>)</button>
         <button class="tab" id="posTabClosed" onclick="switchPosTab('closed')">Closed (<span id="posClosedCount">0</span>)</button>
@@ -331,6 +333,7 @@
       <button class="btn" style="flex:1;font-size:11px;color:var(--green);" onclick="stratCmd('start_strategy')">▶ Start</button>
       <button class="btn" style="flex:1;font-size:11px;" onclick="stratCmd('stop_strategy')">⏸ Pause</button>
       <button class="btn" style="flex:1;font-size:11px;color:var(--red);" onclick="stratCmd('close_strategy')">✕ Close All</button>
+      <button class="btn" style="flex:1;font-size:11px;color:var(--amber);" onclick="stratCmd('export_csv')">↓ CSV</button>
     </div>
     <div class="strat-modal-desc" id="modalDesc">–</div>
     <div class="strat-modal-sec">Strategy PnL</div>
@@ -603,6 +606,11 @@ function _triMarker(ctx,x,y,size,up,color){
   ctx.closePath(); ctx.fill(); ctx.lineWidth=0.6; ctx.strokeStyle="rgba(0,0,0,0.45)"; ctx.stroke();
   ctx.restore();
 }
+function _markerStyle(type){
+  if(type==="long")  return {color:getCss("--green"), up:true,  label:"long"};
+  if(type==="short") return {color:getCss("--red"),   up:false, label:"short"};
+  return {color:getCss("--dim-2"), up:false, label:"exit"};
+}
 function drawTradeMarkers(ctx,instrument,X,Y,t0,w,ch,snapBars,tfsec){
   for(const m of _tradeMarkers(instrument)){
     if(m.t<t0||m.price==null) continue;
@@ -614,9 +622,24 @@ function drawTradeMarkers(ctx,instrument,X,Y,t0,w,ch,snapBars,tfsec){
     }
     const x=X(t); if(x<0||x>w) continue;
     const y=Y(m.price); if(y<-20||y>ch+20) continue;
-    if(m.type==="long")       _triMarker(ctx,x,y,6,true, getCss("--green"));
-    else if(m.type==="short") _triMarker(ctx,x,y,6,false,getCss("--red"));
-    else                      _triMarker(ctx,x,y,6,false,getCss("--dim-2"));
+    const st=_markerStyle(m.type);
+    // Dashed vertical line spanning the chart at the trade time.
+    ctx.save();
+    ctx.strokeStyle=st.color; ctx.globalAlpha=0.8; ctx.lineWidth=1.5;
+    ctx.setLineDash([5,4]);
+    ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,ch); ctx.stroke();
+    ctx.restore();
+    // Label near the top of the line.
+    ctx.save();
+    ctx.font="700 13px ui-monospace,monospace";
+    ctx.textBaseline="top";
+    const tw=ctx.measureText(st.label).width;
+    let lx=x+4; if(lx+tw+6>w) lx=x-tw-8;   // flip left if it would overflow
+    ctx.fillStyle=st.color;
+    ctx.fillRect(lx-3, 2, tw+6, 18);
+    ctx.fillStyle="#000"; ctx.fillText(st.label, lx, 4);
+    ctx.restore();
+    _triMarker(ctx,x,y,7,st.up,st.color);
   }
 }
 function drawLine(ctx,p,w,h,actInds){
@@ -667,27 +690,40 @@ function drawLine(ctx,p,w,h,actInds){
   }
 }
 function drawCandles(ctx,p,w,h,actInds){
-  const all = p.barsByTf[p.timeframe]||[];
-  if(all.length<1){ showEmpty(true); return; } showEmpty(false);
+  const rawAll = p.barsByTf[p.timeframe]||[];
+  if(rawAll.length<1){ showEmpty(true); return; } showEmpty(false);
   const ch=h-AXIS_H;
   const wsec=WINDOW_SEC[p.window]||600;
   const tfsec=TF_SEC[p.timeframe]||60;
-  // Synthesize a live forming bar from ticks since the last closed bar
-  const lastClosed=all[all.length-1];
-  const liveBarT=lastClosed.t+tfsec;
-  const liveTicks=(p.ticks||[]).filter(tk=>tk.t>=liveBarT);
-  let allBars=all;
-  if(liveTicks.length>0){
-    const liveBar={
-      t:liveBarT, live:true,
-      o:liveTicks[0].v, c:liveTicks[liveTicks.length-1].v,
-      h:Math.max(...liveTicks.map(tk=>tk.v)),
-      l:Math.min(...liveTicks.map(tk=>tk.v)),
-      v:liveTicks.reduce((s,tk)=>s+(tk.q||0),0),
-    };
-    allBars=[...all, liveBar];
+  // EXTERNAL Binance klines are timestamped at the bar CLOSE, INTERNAL bars at the
+  // OPEN. Positioning is by open time (b.t + tfsec/2 = centre), so normalize
+  // EXTERNAL bars by subtracting one interval (else each kline is a slot too far right).
+  const closeTimed=(typeof TF_SOURCE!=="undefined") && TF_SOURCE[p.timeframe]==="EXTERNAL";
+  const all = closeTimed ? rawAll.map(b=>({...b, t:b.t-tfsec})) : rawAll;
+  // Append a live forming bar for the current interval, synthesized from this
+  // bucket's ticks. Drop any stream bar already in the current bucket (an unclosed
+  // kline) so we never draw two candles in the same slot.
+  const nowS=Date.now()/1000;
+  const curBucket=Math.floor(nowS/tfsec)*tfsec;   // open time of the forming bar
+  let allBars=all.filter(b=>b.t<curBucket);
+  const bt=(p.ticks||[]).filter(tk=>tk.t>=curBucket);
+  if(bt.length){
+    allBars=[...allBars, {
+      t:curBucket, live:true,
+      o:bt[0].v, c:bt[bt.length-1].v,
+      h:Math.max(...bt.map(tk=>tk.v)),
+      l:Math.min(...bt.map(tk=>tk.v)),
+      v:bt.reduce((s,tk)=>s+(tk.q||0),0),
+    }];
   }
-  const latest=allBars[allBars.length-1].t, t0=latest+tfsec/2-wsec-(p.offset||0);
+  if(!allBars.length){ showEmpty(true); return; }
+  // Keep the newest (forming) candle fully inside the window: pad the right edge
+  // by half a candle. (Must stay well under wsec — a larger pad like 2*tfsec would
+  // push t0 past every bar on higher timeframes, e.g. 5m in a 10m window, blanking
+  // the chart.)
+  const rightPad=tfsec*0.5;
+  const latest=allBars[allBars.length-1].t;
+  const t0=latest+tfsec/2+rightPad-wsec-(p.offset||0);
   const inWin=allBars.filter(b=>b.t>=t0);
   if(!inWin.length){ showEmpty(true); return; }
   let lo=Infinity, hi=-Infinity;
@@ -718,7 +754,10 @@ function drawCandles(ctx,p,w,h,actInds){
     const hoverT=t0+mx/w*wsec;
     const hovered=inWin.reduce((best,b)=>Math.abs(b.t+tfsec/2-hoverT)<Math.abs(best.t+tfsec/2-hoverT)?b:best, inWin[0]);
     const chg=hovered?(hovered.c-hovered.o)/hovered.o*100:0;
-    let label=hovered?`${fmtAxisTime(hovered.t,1)}\nO ${fmt(hovered.o)}  H ${fmt(hovered.h)}\nL ${fmt(hovered.l)}  C ${fmt(hovered.c)}\nvol  ${fmtQty(hovered.v)}  ${chg>=0?"+":""}${chg.toFixed(2)}%`:null;
+    // Show the bar's CLOSE time (open + interval). The live forming bar hasn't
+    // closed yet, so its close time reads as a dash.
+    const hClose=hovered ? (hovered.live ? "—" : fmtAxisTime(hovered.t+tfsec,1)) : "";
+    let label=hovered?`${hClose}\nO ${fmt(hovered.o)}  H ${fmt(hovered.h)}\nL ${fmt(hovered.l)}  C ${fmt(hovered.c)}\nvol  ${fmtQty(hovered.v)}  ${chg>=0?"+":""}${chg.toFixed(2)}%`:null;
     if(label&&actInds){
       const indData=getIndData(p), snap=(hovered&&indData[hovered.t])||{};
       const lines=[];
@@ -796,6 +835,11 @@ function onPortfolio(m){
   const setPnl=(id,k)=>{ const el=document.getElementById(id), o=byCcy(k); el.textContent=fmtPnl(o);
     const sum=Object.values(o).reduce((a,b)=>a+b,0); el.className="val "+pnlClass(sum); };
   setPnl("pnlUnreal","unrealized"); setPnl("pnlReal","realized"); setPnl("pnlTotal","total");
+  // Overall (persisted, cross-session) PnL: a flat {ccy: value} map.
+  const setOverall=id=>{ const el=document.getElementById(id); if(!el) return;
+    const o=m.overall_pnl||{}; el.textContent=fmtPnl(o);
+    const sum=Object.values(o).reduce((a,b)=>a+(b||0),0); el.className="val "+pnlClass(sum); };
+  setOverall("pnlOverall"); setOverall("posOverall");
   // Strategy list
   const el=document.getElementById("stratList");
   const strats=m.strategies||[];
@@ -817,6 +861,8 @@ function onPortfolio(m){
   if(activeModal) _populateModal(activeModal);
   // Refresh the Positions tab if it's the active view
   if(document.getElementById("positionsView").style.display!=="none") renderPositions();
+  // Redraw chart so trade markers update immediately (don't wait for next tick)
+  if(active) render();
 }
 
 // ---------- Positions tab ----------
@@ -941,6 +987,8 @@ function renderPositions(){
   const total=uReal+real, cc=ccy||"USDT";
   const setT=(id,v)=>{ const el=document.getElementById(id); el.textContent=fmtSigned(v)+" "+cc; el.className="val "+pnlClass(v); };
   setT("posUnreal",uReal); setT("posReal",real); setT("posTotal",total);
+  const ov=m.overall_pnl||{}; const ovEl=document.getElementById("posOverall");
+  if(ovEl){ ovEl.textContent=fmtPnl(ov); ovEl.className="val "+pnlClass(Object.values(ov).reduce((a,b)=>a+(b||0),0)); }
   document.getElementById("posOpenCount").textContent=open.length;
   document.getElementById("posClosedCount").textContent=closed.length;
   const now=Date.now();

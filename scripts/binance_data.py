@@ -5,7 +5,7 @@ import time
 import threading
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
-
+import redis
 import redis as syncredis
 from dotenv import load_dotenv
 from nautilus_trader.live.node import TradingNode
@@ -163,14 +163,29 @@ def _strategy_manager(loop):
                         loop.call_soon_threadsafe(_safe_call(strat.start, f"start({sid})"))
                         r.hset(STRATEGY_STATES_KEY, sid, "RUNNING")
                         print(f"[strategy_manager] start scheduled for {sid}")
-                    elif action == "close_strategy":
+                    elif action == "export_csv":
                         _export_positions_csv(r, sid)
+                        print(f"[strategy_manager] CSV exported for {sid}")
+                    elif action == "close_strategy":
                         loop.call_soon_threadsafe(_disarm(strat))
                         loop.call_soon_threadsafe(_safe_call(_cancel_all(strat), f"cancel-orders({sid})"))
                         loop.call_soon_threadsafe(_safe_call(_close_all(strat), f"close_all({sid})"))
-                        loop.call_soon_threadsafe(_safe_call(strat.stop, f"stop({sid})"))
                         r.hset(STRATEGY_STATES_KEY, sid, "STOPPED")
-                        print(f"[strategy_manager] close+stop scheduled for {sid}")
+                        print(f"[strategy_manager] close scheduled for {sid}")
+                        # Retry close until all positions fill; then export CSV and stop.
+                        def _drain_and_stop(strat=strat, sid=sid, r=r):
+                            for _ in range(30):
+                                time.sleep(1)
+                                remaining = strat.cache.positions_open(strategy_id=strat.id)
+                                if not remaining:
+                                    break
+                                loop.call_soon_threadsafe(
+                                    _safe_call(_close_all(strat), f"retry-close({sid})")
+                                )
+                            _export_positions_csv(r, sid)
+                            loop.call_soon_threadsafe(_safe_call(strat.stop, f"stop({sid})"))
+                            print(f"[strategy_manager] all positions closed, stopped {sid}")
+                        threading.Thread(target=_drain_and_stop, daemon=True).start()
                 except Exception as e:
                     print(f"[strategy_manager] error scheduling {action} for {sid}: {e}")
         except Exception as e:
@@ -243,9 +258,9 @@ _ema_SAR = EMACrossStopReverse(EMACrossSARConfig(
     strategy_id="EMACrossStop&Reverse-001",
     instrument_ids=PERP_INSTRUMENTS_SAR,
     trade_usd=Decimal("2000"),
-    bar_spec="5-SECOND-LAST",   # 5-second bars per instrument
+    bar_spec="1-MINUTE-LAST",   # 5-second bars per instrument
     fast_ema_period=5,  
-    slow_ema_period=10,
+    slow_ema_period=15,
 ))
 
 node.trader.add_strategy(_ema)
@@ -275,9 +290,15 @@ for _sid in _strats:
 _r.close()
 """
 
+OVERALL_PNL_KEY = "dashboard:overall_pnl"
+
 if __name__ == "__main__":
-    r = syncredis.Redis.from_url(REDIS_URL, decode_responses=True)
-    r.flushall()
+    r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+    # Preserve the persisted overall (cross-session) PnL across the flush so it
+    # survives node restarts; everything else is session state and gets wiped.
+    _saved_overall = r.get(OVERALL_PNL_KEY)
+    if _saved_overall:
+        r.set(OVERALL_PNL_KEY, _saved_overall)
     # Show strategies on the dashboard immediately as STOPPED, they don't run
     # until the user presses Start (the manager auto-stops them on startup).
     for _sid in _strats:

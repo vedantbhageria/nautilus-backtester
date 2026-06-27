@@ -37,7 +37,8 @@ load_dotenv()
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 HTML_PATH = os.path.join(os.path.dirname(__file__), "dashboard.html")
 
-QUICK_HISTORY_COUNT = 500
+QUICK_HISTORY_COUNT = 50000   # recent ticks replayed from the retained trade stream
+                              # on (re)connect, so the tick view survives a reload
 HIST_FETCH_CAP = 50000   # max backfilled entries pulled into history (dense tick ranges)
 XREAD_BLOCK_MS = 50
 XREAD_COUNT = 500
@@ -347,23 +348,25 @@ async def _send_history(ws: WebSocket, symbol: str, window: str) -> None:
 
 
 async def _tail_bars(symbol: str, bar_type: str) -> None:
-    # Wait for the bar stream (the node may have just been told to aggregate it).
+    # Loop until the stream key appears (a 5-minute bar won't close for up to 5 min)
+    # then tail only NEW bars. _send_bar_history already sent the full history so
+    # we seek to the current tail position to avoid replaying old bars and causing
+    # the chart to slowly scroll forward through history.
     key = None
-    for _ in range(60):  # up to ~30s (1m bars take a minute for the first one)
-        if not bar_clients.get(bar_type):
-            return
-        key = await find_bar_key(bar_type)
-        if key:
-            break
-        await asyncio.sleep(0.5)
-    if key is None:
-        return
-    # Start from the beginning of the stream so backfill bars already written
-    # before this tail task started are not missed. Duplicates with bar_history
-    # are harmless — the dashboard deduplicates by timestamp.
-    cursor = "0-0"
+    cursor = "$"
     try:
         while bar_clients.get(bar_type):
+            if key is None:
+                key = await find_bar_key(bar_type)
+                if key is None:
+                    await asyncio.sleep(2.0)
+                    continue
+                # Seek to just before the newest entry so we deliver the current
+                # (forming/last-closed) bar and every bar after it — without
+                # replaying the whole history (which would scroll the chart forward).
+                # The browser dedups by timestamp, so re-sending the newest is safe.
+                recent = await r.xrevrange(key, count=2)
+                cursor = recent[1][0] if len(recent) > 1 else "0-0"
             try:
                 results = await r.xread({key: cursor}, count=XREAD_COUNT, block=XREAD_BLOCK_MS)
             except RedisError:
@@ -575,6 +578,7 @@ async def _portfolio_frame() -> dict | None:
         strategy_states = await r.hgetall(STRATEGY_STATES_KEY)
     except Exception:
         strategy_states = {}
+
     return {"type": "portfolio", **snap, "metrics": metrics, "strategy_states": strategy_states}
 
 

@@ -1,6 +1,7 @@
 import json
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.indicators import ExponentialMovingAverage
@@ -13,6 +14,30 @@ STRATEGY_SET = "dashboard:strategies"     # live registry of running strategies 
 METRICS_PREFIX = "dashboard:metrics:"     # per-strategy free-form metrics for the dashboard
 
 _MIN_ORDER_USD = 5  # Binance minimum notional per order
+_UNIT_SECONDS = {"SECOND": 1, "MINUTE": 60, "HOUR": 3600, "DAY": 86400, "WEEK": 604800}
+
+
+def _spec_interval_seconds(bar_spec: str) -> int:
+    parts = bar_spec.split("-")
+    try:
+        return int(parts[0]) * _UNIT_SECONDS.get(parts[1].upper(), 60)
+    except (ValueError, IndexError):
+        return 60
+
+
+def _bar_source_for_spec(bar_spec: str) -> str:
+    """Choose the aggregation source from the bar spec, matching the dashboard.
+
+    Minute+ time bars use official Binance klines (EXTERNAL) — these are also what
+    the dashboard's 1m/5m/15m/1h views read, so the strategy and chart share one
+    Redis stream. Sub-minute and count-based bars have no klines, so Nautilus
+    aggregates them from trades (INTERNAL).
+    """
+    parts = bar_spec.split("-")
+    unit = parts[1].upper() if len(parts) >= 2 else ""
+    if unit in ("MINUTE", "HOUR", "DAY", "WEEK"):
+        return "EXTERNAL"
+    return "INTERNAL"
 
 
 class EMACrossConfig(StrategyConfig, frozen=True):
@@ -27,8 +52,9 @@ class EMACross(Strategy):
     def __init__(self, config: EMACrossConfig):
         super().__init__(config)
         # Per-instrument bar types and EMA pairs.
+        _src = _bar_source_for_spec(config.bar_spec)
         self._bar_types: dict[InstrumentId, BarType] = {
-            iid: BarType.from_str(f"{iid}-{config.bar_spec}-INTERNAL")
+            iid: BarType.from_str(f"{iid}-{config.bar_spec}-{_src}")
             for iid in config.instrument_ids
         }
         self._fast: dict[InstrumentId, ExponentialMovingAverage] = {
@@ -57,16 +83,37 @@ class EMACross(Strategy):
             self._redis = None
             self.log.warning(f"Strategy registry unavailable: {e}")
 
-        # Only subscribe to bars (and thus start trading) when armed.
         if self._active:
             for iid in self.config.instrument_ids:
                 bt = self._bar_types[iid]
                 self.register_indicator_for_bars(bt, self._fast[iid])
                 self.register_indicator_for_bars(bt, self._slow[iid])
                 self.subscribe_bars(bt)
-            self.log.info(f"Armed: subscribed to {len(self.config.instrument_ids)} x {self.config.bar_spec} bars")
+                # Feed the sandbox execution client live quotes so it has a market
+                # to fill against (EXTERNAL kline bars don't produce ticks, so
+                # without this the sandbox rejects orders — no bid/ask/last price).
+                self.subscribe_quote_ticks(iid)
+            self._warmup_emas()
+            self.log.info(f"Armed: subscribed to {len(self.config.instrument_ids)} x {self.config.bar_spec} bars + quotes")
         else:
             self.log.info("Disarmed on start — idle until armed by controller")
+
+    def _warmup_emas(self) -> None:
+        # Pre-initialize the EMAs from historical bars so the strategy can signal
+        # immediately instead of waiting ~slow_ema_period live bars. Registered
+        # indicators are fed automatically by the historical request response
+        # (Nautilus handle_bar(historical=True)); on_bar is NOT called for
+        # historical bars, so there are no warmup trades. Only safe for EXTERNAL
+        # klines (REST fetch, no streams, no tick re-aggregation).
+        if _bar_source_for_spec(self.config.bar_spec) != "EXTERNAL":
+            self.log.info("EMA warmup skipped (INTERNAL bars aggregate live)")
+            return
+        warmup_n = self.config.slow_ema_period * 4
+        secs = warmup_n * _spec_interval_seconds(self.config.bar_spec)
+        start = datetime.now(timezone.utc) - timedelta(seconds=secs)
+        for iid in self.config.instrument_ids:
+            self.request_bars(self._bar_types[iid], start=start)
+        self.log.info(f"EMA warmup: requested ~{warmup_n} historical bars for {len(self.config.instrument_ids)} instruments")
 
     def _description(self) -> str:
         return (
@@ -112,7 +159,9 @@ class EMACross(Strategy):
         )
 
     def on_order_rejected(self, event) -> None:
-        self._publish_order_event("rejected", event.instrument_id)
+        reason = getattr(event, "reason", "")
+        self.log.warning(f"Order REJECTED {event.instrument_id}: {reason}")
+        self._publish_order_event("rejected", event.instrument_id, price=str(reason))
 
     def on_order_canceled(self, event) -> None:
         self._publish_order_event("canceled", event.instrument_id)
