@@ -22,8 +22,12 @@ COMMAND_STREAM = "dashboard:commands"
 PORTFOLIO_KEY = "dashboard:portfolio"
 STRATEGY_SET = "dashboard:strategies"
 INDICATORS_PREFIX = "dashboard:indicators:"
-EQUITY_KEY = "dashboard:equity"                       # account equity time-series (list)
-EQUITY_PEAK_KEY = "dashboard:equity:peak"             # all-time high-water NAV (for drawdown)
+EQUITY_KEY = "dashboard:equity"                       # legacy combined key (kept for compat)
+EQUITY_LIVE_KEY = "dashboard:equity:live"
+EQUITY_TEST_KEY = "dashboard:equity:test"
+EQUITY_LIVE_PEAK_KEY = "dashboard:equity:live:peak"
+EQUITY_TEST_PEAK_KEY = "dashboard:equity:test:peak"
+STRATEGY_MODES_KEY = "dashboard:strategy_modes"
 _ACCOUNT_START = float(os.getenv("ACCOUNT_START_EQUITY", "100000"))  # sandbox starting balance
 _EQUITY_INTERVAL_MS = 5000                            # record one equity point every 5s
 _EQUITY_CAP = 100000                                  # ~5.8 days at 5s; persists across restarts
@@ -43,7 +47,8 @@ class ControlActor(Actor):
         self._cmd_cursor = "$"
         self._indicators: dict[str, dict] = {}       # "{instrument_id}:{spec}" -> indicator instances
         self._last_equity_ms = 0                     # last time an equity point was recorded
-        self._equity_peak = _ACCOUNT_START           # all-time high-water NAV (for drawdown)
+        self._equity_peak_live = _ACCOUNT_START
+        self._equity_peak_test = _ACCOUNT_START
         # Closed positions copied out of the cache before it purges them (~1 min),
         # so the dashboard's closed-positions list stays stable. position_id -> record.
         self._closed_positions: dict[str, dict] = {}
@@ -76,9 +81,12 @@ class ControlActor(Actor):
             # Restore the all-time NAV peak so drawdown is measured against the
             # true high-water mark across restarts (not just the retained window).
             try:
-                pk = self._redis.get(EQUITY_PEAK_KEY)
+                pk = self._redis.get(EQUITY_LIVE_PEAK_KEY)
                 if pk is not None:
-                    self._equity_peak = max(self._equity_peak, float(pk))
+                    self._equity_peak_live = max(self._equity_peak_live, float(pk))
+                pk = self._redis.get(EQUITY_TEST_PEAK_KEY)
+                if pk is not None:
+                    self._equity_peak_test = max(self._equity_peak_test, float(pk))
             except Exception:
                 pass
             self.clock.set_timer(
@@ -168,29 +176,50 @@ class ControlActor(Actor):
                 d["realized"] += c["realized"]
             for v in pnl.values():
                 v["total"] = v["realized"] + v["unrealized"]
-            # Record an account equity point (throttled) for the account view's
-            # NAV / return / drawdown charts. Summed across currencies (USDT here).
+            # Record per-mode equity points (throttled) for NAV / return / drawdown charts.
             now_ms = int(self.clock.timestamp_ns() // 1_000_000)
             if now_ms - self._last_equity_ms >= _EQUITY_INTERVAL_MS:
                 self._last_equity_ms = now_ms
-                realized = sum(v["realized"] for v in pnl.values())
-                unrealized = sum(v["unrealized"] for v in pnl.values())
-                total = realized + unrealized
-                nav = _ACCOUNT_START + total
-                if nav > self._equity_peak:
-                    self._equity_peak = nav
                 try:
-                    self._redis.rpush(EQUITY_KEY, json.dumps({
-                        "ts": now_ms,
-                        "realized": round(realized, 4),
-                        "unrealized": round(unrealized, 4),
-                        "total": round(total, 4),
-                        "nav": round(nav, 4),
-                    }))
-                    self._redis.ltrim(EQUITY_KEY, -_EQUITY_CAP, -1)
-                    self._redis.set(EQUITY_PEAK_KEY, self._equity_peak)
+                    mode_map = self._redis.hgetall(STRATEGY_MODES_KEY) or {}
                 except Exception:
-                    pass
+                    mode_map = {}
+                all_strats = {rec["strategy"] for rec in positions} | set(self._closed_positions.keys() and [c["strategy"] for c in self._closed_positions.values()])
+                untagged = {sid for sid in all_strats if sid not in mode_map}
+                for mode_key, equity_key, peak_key, peak_attr in (
+                    ("live", EQUITY_LIVE_KEY, EQUITY_LIVE_PEAK_KEY, "_equity_peak_live"),
+                    ("test", EQUITY_TEST_KEY, EQUITY_TEST_PEAK_KEY, "_equity_peak_test"),
+                ):
+                    if mode_key == "live":
+                        mode_strats = {sid for sid, m in mode_map.items() if m == "live"} | untagged
+                    else:
+                        mode_strats = {sid for sid, m in mode_map.items() if m == "test"}
+                    mode_real = sum(
+                        rec["realized"] for rec in positions if rec.get("strategy") in mode_strats
+                    ) + sum(
+                        c["realized"] for c in self._closed_positions.values() if c.get("strategy") in mode_strats
+                    )
+                    mode_unreal = sum(
+                        rec["unrealized"] for rec in positions if rec.get("strategy") in mode_strats
+                    )
+                    total = mode_real + mode_unreal
+                    nav = _ACCOUNT_START + total
+                    peak = getattr(self, peak_attr)
+                    if nav > peak:
+                        peak = nav
+                        setattr(self, peak_attr, peak)
+                    try:
+                        self._redis.rpush(equity_key, json.dumps({
+                            "ts": now_ms,
+                            "realized": round(mode_real, 4),
+                            "unrealized": round(mode_unreal, 4),
+                            "total": round(total, 4),
+                            "nav": round(nav, 4),
+                        }))
+                        self._redis.ltrim(equity_key, -_EQUITY_CAP, -1)
+                        self._redis.set(peak_key, peak)
+                    except Exception:
+                        pass
             # Overall (cross-session) PnL = persisted base + this session's realized.
             # Written back each tick so on the next restart it becomes the new base
             # (the session's realized PnL is "banked"). Session PnL stays in `pnl`.

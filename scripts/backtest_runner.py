@@ -76,15 +76,30 @@ def _set_meta(r, **kw):
         pass
 
 
-def run_backtest(r, live_strategy, instruments, days: int = 4) -> None:
-    """Fetch data, run the engine, write results. `r` is a sync Redis client."""
+def run_backtest(r, live_strategy, instruments,
+                 days: int = 4,
+                 start_date: str | None = None,
+                 end_date: str | None = None) -> None:
+    """Fetch data, run the engine, write results. `r` is a sync Redis client.
+
+    start_date / end_date: ISO-8601 date strings (YYYY-MM-DD).
+    If end_date is None the range ends NOW and the caller is responsible for
+    starting the live strategy after this function returns (live handoff).
+    """
     cfg_live = live_strategy.config
     sid = str(live_strategy.id)
     started = time.time()
     try:
-        end = datetime.now(timezone.utc)
-        start = end - timedelta(days=days)
+        if start_date:
+            start = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
+        else:
+            start = datetime.now(timezone.utc) - timedelta(days=days)
+        if end_date:
+            end = datetime.fromisoformat(end_date).replace(tzinfo=timezone.utc)
+        else:
+            end = datetime.now(timezone.utc)
         start_ms, end_ms = int(start.timestamp() * 1000), int(end.timestamp() * 1000)
+        actual_days = max(1, int((end - start).total_seconds() / 86400))
 
         # Clear any previous run's per-instrument series.
         for key in r.scan_iter(match=f"{BT}:bars:*", count=1000):
@@ -92,8 +107,10 @@ def run_backtest(r, live_strategy, instruments, days: int = 4) -> None:
         for key in r.scan_iter(match=f"{BT}:indicators:*", count=1000):
             r.delete(key)
 
-        _set_meta(r, status="running", strategy=sid, days=days,
-                  n=len(instruments), done=0, started=started)
+        _set_meta(r, status="running", strategy=sid, days=actual_days,
+                  n=len(instruments), done=0, started=started,
+                  start_date=start.date().isoformat(), end_date=end.date().isoformat(),
+                  live_handoff=(end_date is None))
 
         engine = BacktestEngine(config=BacktestEngineConfig(
             trader_id="BACKTESTER-001",
@@ -116,7 +133,7 @@ def run_backtest(r, live_strategy, instruments, days: int = 4) -> None:
             sym = inst.id.symbol.value.replace("-PERP", "")   # ETHUSDT-PERP -> ETHUSDT
             klines = _fetch_klines(sym, start_ms, end_ms)
             if not klines:
-                _set_meta(r, status="running", strategy=sid, days=days,
+                _set_meta(r, status="running", strategy=sid, days=actual_days,
                           n=len(instruments), done=i + 1, started=started)
                 continue
             bar_type = BarType.from_str(f"{inst.id}-1-MINUTE-LAST-EXTERNAL")
@@ -134,11 +151,15 @@ def run_backtest(r, live_strategy, instruments, days: int = 4) -> None:
                 if fast.initialized and slow.initialized:
                     ema_json.append({"ts": t, "fast_ema": round(fast.value, 6),
                                      "slow_ema": round(slow.value, 6)})
-            pipe.set(f"{BT}:bars:{inst.id}", json.dumps(bars_json))
+            bars_json_str = json.dumps(bars_json)
+            pipe.set(f"{BT}:bars:{inst.id}", bars_json_str)
             pipe.set(f"{BT}:indicators:{inst.id}", json.dumps(ema_json))
+            # Write chart bars so the dashboard can merge them into the live chart.
+            # Key: test:chart:{instrument_id}-1-MINUTE-LAST-EXTERNAL
+            pipe.set(f"test:chart:{inst.id}-1-MINUTE-LAST-EXTERNAL", bars_json_str)
             if i % 10 == 0:
                 pipe.execute(); pipe = r.pipeline()
-                _set_meta(r, status="running", strategy=sid, days=days,
+                _set_meta(r, status="running", strategy=sid, days=actual_days,
                           n=len(instruments), done=i + 1, started=started)
         pipe.execute()
 
@@ -154,7 +175,7 @@ def run_backtest(r, live_strategy, instruments, days: int = 4) -> None:
             backtest=True,
         )
         engine.add_strategy(EMACrossStopReverse(bt_cfg))
-        _set_meta(r, status="running", strategy=sid, days=days,
+        _set_meta(r, status="running", strategy=sid, days=actual_days,
                   n=len(instruments), done=len(instruments), started=started, phase="engine")
         engine.run()
 
@@ -198,13 +219,54 @@ def run_backtest(r, live_strategy, instruments, days: int = 4) -> None:
         for v in pnl.values():
             v["total"] = v["realized"] + v["unrealized"]
 
+        # On live handoff: treat backtest open positions as closed at end_ms
+        # (they enter the closed history) and write them to a handoff key so
+        # the live strategy can immediately re-enter the same positions.
+        if end_date is None and open_pos:
+            for p in open_pos:
+                p["ts_closed"] = end_ms
+                p["avg_px_close"] = p.get("avg_px", p.get("avg_px_open", 0))
+                p["realized"] = 0.0   # no realized PnL — closed at same price for handoff
+                closed_pos.append(p)
+            r.set(f"{BT}:handoff_positions", json.dumps(open_pos))
+            open_pos = []
+        else:
+            r.delete(f"{BT}:handoff_positions")
+
         closed_pos.sort(key=lambda c: c["ts_closed"], reverse=True)
         r.set(f"{BT}:positions", json.dumps({
             "positions": open_pos, "closed_positions": closed_pos, "pnl": pnl}))
-        _set_meta(r, status="done", strategy=sid, days=days, n=len(instruments),
+
+        # Build an equity curve (cumulative realized PnL over the backtest period)
+        # so the Account tab can show a continuous history for test mode.
+        equity_pts = [{"ts": start_ms, "nav": 100_000.0, "realized": 0.0, "unrealized": 0.0, "total": 0.0}]
+        running = 0.0
+        for cp in sorted(closed_pos, key=lambda c: c["ts_closed"]):
+            running += cp.get("realized", 0.0)
+            equity_pts.append({
+                "ts": cp["ts_closed"],
+                "nav": round(100_000.0 + running, 4),
+                "realized": round(running, 4),
+                "unrealized": 0.0,
+                "total": round(running, 4),
+            })
+        # Add a final point at end_ms with any open position unrealized
+        bt_unreal = sum(p.get("unrealized", 0.0) for p in open_pos)
+        equity_pts.append({
+            "ts": end_ms,
+            "nav": round(100_000.0 + running + bt_unreal, 4),
+            "realized": round(running, 4),
+            "unrealized": round(bt_unreal, 4),
+            "total": round(running + bt_unreal, 4),
+        })
+        r.set(f"{BT}:equity", json.dumps(equity_pts))
+        # Store the ending NAV as the test equity starting point for the live handoff
+        r.set(f"{BT}:equity:end_nav", str(round(100_000.0 + running + bt_unreal, 4)))
+        _set_meta(r, status="done", strategy=sid, days=actual_days, n=len(instruments),
                   done=len(instruments), started=started, finished=time.time(),
                   open=len(open_pos), closed=len(closed_pos), pnl=pnl,
-                  start_ms=start_ms, end_ms=end_ms)
+                  start_ms=start_ms, end_ms=end_ms,
+                  live_handoff=(end_date is None))
         try:
             engine.dispose()
         except Exception:

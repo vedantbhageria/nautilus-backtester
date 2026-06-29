@@ -70,6 +70,7 @@ class EMACrossStopReverse(Strategy):
         self._ema_snapshot: dict[str, dict] = {}
         self._prev_signal: dict[InstrumentId, str] = {}  # "bull" | "bear"
         self._pending_entries: set[InstrumentId] = set()  # submitted but not yet filled
+        self._open_count: int = 0   # open + pending positions; authoritative cap counter
         self._active = False
 
     def on_start(self):
@@ -111,30 +112,67 @@ class EMACrossStopReverse(Strategy):
                 # produce ticks, so without this the sandbox has no market to fill
                 # against and rejects orders. Quote ticks keep its L1 book populated.
                 self.subscribe_quote_ticks(iid)
+            self._reenter_handoff_positions()
             self._warmup_emas()
             self.log.info(f"Armed: subscribed to {len(self.config.instrument_ids)} x {self.config.bar_spec} bars + quotes")
         else:
             self.log.info("Disarmed on start — idle until armed by controller")
 
+    def _reenter_handoff_positions(self) -> None:
+        if self._redis is None:
+            return
+        try:
+            raw = self._redis.get("dashboard:backtest:handoff_positions")
+            if not raw:
+                return
+            handoff = json.loads(raw)
+            self._redis.delete("dashboard:backtest:handoff_positions")
+        except Exception as e:
+            self.log.warning(f"Could not read handoff positions: {e}")
+            return
+
+        iid_map = {str(iid): iid for iid in self.config.instrument_ids}
+        entered = 0
+        for p in handoff:
+            iid = iid_map.get(p.get("instrument"))
+            if iid is None:
+                continue
+            if self._open_count >= 50 or iid in self._pending_entries:
+                continue
+            side_str = p.get("side", "")
+            if side_str in ("LONG", "BUY"):
+                order_side = OrderSide.BUY
+            elif side_str in ("SHORT", "SELL"):
+                order_side = OrderSide.SELL
+            else:
+                continue
+            self._pending_entries.add(iid)
+            self._open_count += 1
+            self._trade(iid, order_side, p.get("avg_px", 0) or p.get("avg_px_open", 0))
+            entered += 1
+
+        if entered:
+            self.log.info(f"Handoff: re-entered {entered} positions from backtest")
+
     def _warmup_emas(self) -> None:
         # Pre-initialize the EMAs from historical bars so the strategy can signal
-        # immediately instead of waiting ~slow_ema_period live bars. Registered
-        # indicators are fed automatically by the historical request response
-        # (Nautilus handle_bar(historical=True)), and on_bar is NOT called for
-        # historical bars, so there are no warmup trades.
+        # immediately. Registered indicators are fed automatically via handle_bar
+        # (historical=True); on_bar is NOT called for historical bars so there are
+        # no warmup trades. Only safe for EXTERNAL klines.
         #
-        # Only safe for EXTERNAL klines: request_bars fetches pre-aggregated klines
-        # over REST (no websocket streams, no tick re-aggregation). For INTERNAL
-        # bars this would re-aggregate trades and can crash the time-bar clock.
+        # We always use slow_ema * 2 bars regardless of any user-supplied start
+        # date — that date is only used for chart visualization (fetched separately
+        # in binance_data.py). Keeping warmup short avoids Binance REST rate-limit
+        # bans when the strategy has many instruments.
         if _bar_source_for_spec(self.config.bar_spec) != "EXTERNAL":
             self.log.info("EMA warmup skipped (INTERNAL bars aggregate live)")
             return
-        warmup_n = self.config.slow_ema_period * 2   # plenty for EMA to initialize
+        warmup_n = self.config.slow_ema_period * 2
         secs = warmup_n * _spec_interval_seconds(self.config.bar_spec)
         start = datetime.now(timezone.utc) - timedelta(seconds=secs)
+        self.log.info(f"EMA warmup: requesting ~{warmup_n} bars × {len(self.config.instrument_ids)} instruments")
         for iid in self.config.instrument_ids:
             self.request_bars(self._bar_types[iid], start=start)
-        self.log.info(f"EMA warmup: requested ~{warmup_n} historical bars for {len(self.config.instrument_ids)} instruments")
 
     def _description(self) -> str:
         return (
@@ -169,6 +207,7 @@ class EMACrossStopReverse(Strategy):
             pass
 
     def on_order_filled(self, event) -> None:
+        was_pending = event.instrument_id in self._pending_entries
         self._pending_entries.discard(event.instrument_id)
         side = getattr(event, "order_side", None)
         px = getattr(event, "last_px", None)
@@ -179,15 +218,24 @@ class EMACrossStopReverse(Strategy):
             qty=str(qty) if qty is not None else "",
             price=str(px) if px is not None else "",
         )
+        # If this was a closing fill (not an opening fill we submitted), decrement count.
+        # Opening fills: was_pending=True (we added iid to pending before submitting).
+        # Closing fills (from close_all_positions): was_pending=False.
+        if not was_pending:
+            self._open_count = max(0, self._open_count - 1)
 
     def on_order_rejected(self, event) -> None:
-        self._pending_entries.discard(event.instrument_id)
+        if event.instrument_id in self._pending_entries:
+            self._pending_entries.discard(event.instrument_id)
+            self._open_count = max(0, self._open_count - 1)
         reason = getattr(event, "reason", "")
         self.log.warning(f"Order REJECTED {event.instrument_id}: {reason}")
         self._publish_order_event("rejected", event.instrument_id, price=str(reason))
 
     def on_order_canceled(self, event) -> None:
-        self._pending_entries.discard(event.instrument_id)
+        if event.instrument_id in self._pending_entries:
+            self._pending_entries.discard(event.instrument_id)
+            self._open_count = max(0, self._open_count - 1)
         self._publish_order_event("canceled", event.instrument_id)
 
     def _publish_indicator(self, bar: Bar, fast_v: float, slow_v: float) -> None:
@@ -263,18 +311,19 @@ class EMACrossStopReverse(Strategy):
         if prev is None or signal == prev:  # first bar or no crossover, skip
             return
         
-        effective_open = len(self.cache.positions_open(strategy_id=self.id)) + len(self._pending_entries)
         if signal == "bull":
             if self.portfolio.is_flat(iid) or self.portfolio.is_net_short(iid):
                 self.close_all_positions(iid)
-                if effective_open < 50 and iid not in self._pending_entries:
+                if self._open_count < 50 and iid not in self._pending_entries:
                     self._pending_entries.add(iid)
+                    self._open_count += 1
                     self._trade(iid, OrderSide.BUY, price)
         elif signal == "bear":
             if self.portfolio.is_flat(iid) or self.portfolio.is_net_long(iid):
                 self.close_all_positions(iid)
-                if effective_open < 50 and iid not in self._pending_entries:
+                if self._open_count < 50 and iid not in self._pending_entries:
                     self._pending_entries.add(iid)
+                    self._open_count += 1
                     self._trade(iid, OrderSide.SELL, price)
 
     def _trade(self, iid: InstrumentId, side: OrderSide, price: float) -> None:

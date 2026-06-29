@@ -17,6 +17,15 @@
   html,body{ margin:0; height:100%; background:var(--bg); color:var(--text); font-family:var(--mono); font-size:13px; }
   body{ display:flex; flex-direction:column; }
 
+  /* Mode bar */
+  #modeBar{ display:flex; align-items:center; gap:0; padding:0 20px; background:#0d0e11; border-bottom:1px solid var(--line); flex-shrink:0; height:34px; }
+  .mode-tab{ background:none; border:none; border-bottom:2px solid transparent; color:var(--dim-2); font-family:var(--mono); font-size:11px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; padding:0 18px; height:34px; cursor:pointer; transition:.15s; }
+  .mode-tab:hover{ color:var(--dim); }
+  .mode-tab.active.live{ color:var(--green); border-bottom-color:var(--green); }
+  .mode-tab.active.test{ color:#22d3ee; border-bottom-color:#22d3ee; }
+  #modeLabel{ font-size:10px; color:var(--dim-2); margin-left:16px; }
+  #modeSep{ width:1px; height:16px; background:var(--line); margin:0 8px; }
+
   /* Header */
   header{ display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding:12px 20px; border-bottom:1px solid var(--line-soft); background:var(--panel); flex-shrink:0; }
   .title{ font-size:13px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; color:var(--amber); }
@@ -154,10 +163,11 @@
   .pos-summary .ptile{ background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px 16px; min-width:150px; }
   .pos-summary .ptile .lbl{ font-size:9px; letter-spacing:.1em; text-transform:uppercase; color:var(--dim-2); }
   .pos-summary .ptile .val{ font-size:18px; font-weight:700; font-variant-numeric:tabular-nums; margin-top:3px; }
+  .pos-summary .ptile .sub{ font-size:9px; color:var(--dim-2); margin-top:3px; font-variant-numeric:tabular-nums; }
   .pos-tables{ display:flex; gap:14px; align-items:flex-start; }
   .pos-table-wrap{ flex:1; min-width:0; background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; display:flex; flex-direction:column; }
   .pos-table-scroll{ flex:1; overflow-y:auto; max-height:75vh; }
-  table.pos-table{ width:100%; border-collapse:collapse; font-size:10.5px; }
+  table.pos-table{ width:100%; border-collapse:collapse; font-size:13.5px; }
   table.pos-table th{ position:sticky; top:0; background:var(--panel-2); color:var(--dim-2); font-size:9px; text-transform:uppercase; letter-spacing:.06em; text-align:right; padding:7px 9px; border-bottom:1px solid var(--line); white-space:nowrap; }
   table.pos-table th.sortable{ cursor:pointer; user-select:none; }
   table.pos-table th.sortable:hover{ color:var(--text); }
@@ -174,18 +184,34 @@
   .up{ color:var(--green); } .down{ color:var(--red); }
   /* Account view */
   #accountView{ flex:1; overflow:auto; padding:14px 18px 20px; }
-  .ac-chart-wrap{ background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:14px; flex:1; min-width:0; }
+  .ac-chart-wrap{ background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:14px; flex:1; min-width:0; cursor:pointer; transition:border-color .15s; }
+  .ac-chart-wrap:hover{ border-color:var(--dim); }
   .ac-chart-head{ display:flex; justify-content:space-between; align-items:baseline; font-size:9px; letter-spacing:.1em; text-transform:uppercase; color:var(--dim-2); margin-bottom:8px; }
   .ac-chart-head .ac-run{ font-size:16px; font-weight:700; font-variant-numeric:tabular-nums; letter-spacing:0; text-transform:none; color:var(--text); }
   .ac-canvas{ width:100%; height:200px; display:block; }
   .ac-chart-row{ display:flex; gap:14px; }
   .ac-chart-row .ac-chart-wrap{ margin-bottom:0; }
+  /* Floating chart zoom overlay */
+  #acZoomOverlay{ position:fixed; inset:0; background:rgba(0,0,0,.72); z-index:9000; display:none; align-items:center; justify-content:center; }
+  #acZoomOverlay.open{ display:flex; }
+  #acZoomCard{ background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px 20px 16px; width:min(900px,92vw); max-height:90vh; display:flex; flex-direction:column; gap:12px; }
+  #acZoomHead{ display:flex; justify-content:space-between; align-items:center; }
+  #acZoomTitle{ font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--dim-2); }
+  #acZoomVal{ font-size:22px; font-weight:700; font-variant-numeric:tabular-nums; }
+  #acZoomHint{ font-size:9.5px; color:var(--dim-2); }
+  #acZoomCanvas{ width:100%; height:360px; display:block; cursor:grab; border-radius:6px; }
 </style>
 </head>
 <body>
+  <div id="modeBar">
+    <button id="modeLive" class="mode-tab active live" onclick="setMode('live')">● Live</button>
+    <button id="modeTest" class="mode-tab test" onclick="setMode('test')">⚗ Test</button>
+    <div id="modeSep"></div>
+    <span id="modeLabel">live trading · DEMO execution</span>
+  </div>
   <header>
     <span class="live-dot" id="connDot"></span>
-    <span class="title">Nautilus Pipeline</span>
+    <span class="title" id="headerTitle">Nautilus · Live</span>
     <span class="conn" id="connTxt">connecting…</span>
     <div class="tabs">
       <button class="tab active" data-view="charts" onclick="switchView('charts')">Charts</button>
@@ -227,10 +253,7 @@
         <input type="range" id="tfSlider" min="0" max="7" step="1" value="0" />
         <span class="tf-val" id="tfVal">tick</span>
         <span class="tf-hint">tick = raw trades · 1s/5s/15s = INTERNAL · 1m+ = EXTERNAL klines</span>
-        <span style="margin-left:auto;display:flex;gap:0;border:1px solid var(--line);border-radius:6px;overflow:hidden;">
-          <button id="btToggleLive" class="btn active" style="font-size:10px;border:none;border-radius:0;" onclick="setBacktestMode(false)">Live</button>
-          <button id="btToggleBt" class="btn" style="font-size:10px;border:none;border-radius:0;color:#22d3ee;" onclick="setBacktestMode(true)">Backtest</button>
-        </span>
+        <span id="btHandoffBadge" style="margin-left:auto;display:none;font-size:10px;color:#22d3ee;padding:4px 10px;border:1px solid #22d3ee;border-radius:6px;">⚗ backtest history loaded</span>
       </div>
       <div class="ind-bar">
         <span class="tf-label">overlay</span>
@@ -297,11 +320,10 @@
       <div class="ptile"><div class="lbl">unrealized pnl</div><div class="val" id="posUnreal">–</div></div>
       <div class="ptile"><div class="lbl">realized pnl</div><div class="val" id="posReal">–</div></div>
       <div class="ptile"><div class="lbl">session pnl</div><div class="val" id="posTotal">–</div></div>
-      <div class="ptile"><div class="lbl">overall pnl</div><div class="val" id="posOverall">–</div></div>
+      <div class="ptile" id="posOverallTile"><div class="lbl">overall pnl</div><div class="val" id="posOverall">–</div></div>
       <div style="display:flex;gap:6px;align-items:center;margin-left:16px;">
         <button class="tab active" id="posTabOpen" onclick="switchPosTab('open')">Open (<span id="posOpenCount">0</span>)</button>
         <button class="tab" id="posTabClosed" onclick="switchPosTab('closed')">Closed (<span id="posClosedCount">0</span>)</button>
-        <button class="tab" id="posTabBacktest" style="color:#22d3ee;" onclick="switchPosTab('backtest')">Backtest (<span id="posBtCount">0</span>)</button>
       </div>
       <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
         <button class="btn" id="byStratBtn" onclick="toggleStratView()">By Strategy</button>
@@ -314,11 +336,9 @@
         <div class="pos-table-scroll"><table class="pos-table" id="posOpenTable"></table></div>
       </div>
       <div id="posClosedPane" class="pos-table-wrap" style="display:none;">
-        <div class="pos-table-scroll"><table class="pos-table" id="posClosedTable"></table></div>
-      </div>
-      <div id="posBacktestPane" class="pos-table-wrap" style="display:none;">
-        <div style="display:flex;gap:10px;margin:0 0 10px;font-size:11px;color:var(--dim-2);" id="posBtSummary"></div>
-        <div class="pos-table-scroll"><table class="pos-table" id="posBtTable"></table></div>
+        <div class="pos-table-scroll" id="closedVCScroll">
+          <table class="pos-table" id="posClosedTable" style="table-layout:fixed;width:100%;"></table>
+        </div>
       </div>
     </div>
   </div>
@@ -330,18 +350,19 @@
       <div class="ptile"><div class="lbl">unrealized pnl</div><div class="val" id="acUnreal">–</div></div>
       <div class="ptile"><div class="lbl">overall pnl</div><div class="val" id="acOverall">–</div></div>
       <div class="ptile"><div class="lbl">return</div><div class="val" id="acReturn">–</div></div>
-      <div class="ptile"><div class="lbl">max drawdown</div><div class="val" id="acMaxDD">–</div></div>
+      <div class="ptile"><div class="lbl">peak nav</div><div class="val" id="acPeakNav">–</div><div class="sub" id="acPeakNavTs">–</div></div>
+      <div class="ptile"><div class="lbl">max drawdown</div><div class="val" id="acMaxDD">–</div><div class="sub" id="acMaxDDTs">–</div></div>
     </div>
-    <div class="ac-chart-wrap">
+    <div class="ac-chart-wrap" onclick="openAcZoom('nav')">
       <div class="ac-chart-head"><span>NAV (USDT)</span><span class="ac-run" id="acNavNow">–</span></div>
       <canvas class="ac-canvas" id="acNavChart"></canvas>
     </div>
     <div class="ac-chart-row">
-      <div class="ac-chart-wrap">
+      <div class="ac-chart-wrap" onclick="openAcZoom('ret')">
         <div class="ac-chart-head"><span>Return %</span><span class="ac-run" id="acRetNow">–</span></div>
         <canvas class="ac-canvas" id="acRetChart"></canvas>
       </div>
-      <div class="ac-chart-wrap">
+      <div class="ac-chart-wrap" onclick="openAcZoom('dd')">
         <div class="ac-chart-head"><span>Drawdown % (underwater)</span><span class="ac-run" id="acDdNow">–</span></div>
         <canvas class="ac-canvas" id="acDdChart"></canvas>
       </div>
@@ -353,6 +374,23 @@
     <span>received <b id="fBytes">0 B</b></span>
     <span>instruments <b id="fCount">0</b></span>
   </footer>
+
+<!-- Account chart zoom overlay -->
+<div id="acZoomOverlay" onclick="if(event.target===this)closeAcZoom()">
+  <div id="acZoomCard">
+    <div id="acZoomHead">
+      <div>
+        <div id="acZoomTitle">–</div>
+        <div id="acZoomVal">–</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:14px;">
+        <span id="acZoomHint">scroll to zoom · drag to pan</span>
+        <button onclick="closeAcZoom()" style="background:none;border:none;color:var(--dim);font-size:16px;cursor:pointer;padding:2px 6px;">✕</button>
+      </div>
+    </div>
+    <canvas id="acZoomCanvas"></canvas>
+  </div>
+</div>
 
 <!-- Strategy drill-down modal -->
 <div id="stratModal" class="strat-modal-backdrop" style="display:none;" onclick="if(event.target===this)closeStratModal()">
@@ -373,15 +411,33 @@
       <span class="sm-name" id="modalStratName"></span>
       <button onclick="closeStratModal()">✕</button>
     </div>
-    <div id="modalControls" style="display:flex;gap:7px;margin-bottom:8px;">
+    <!-- Live mode controls -->
+    <div id="modalControlsLive" style="display:flex;gap:7px;margin-bottom:8px;">
       <button class="btn" style="flex:1;font-size:11px;color:var(--green);" onclick="stratCmd('start_strategy')">▶ Start</button>
       <button class="btn" style="flex:1;font-size:11px;" onclick="stratCmd('stop_strategy')">⏸ Pause</button>
       <button class="btn" style="flex:1;font-size:11px;color:var(--red);" onclick="stratCmd('close_strategy')">✕ Close All</button>
       <button class="btn" style="flex:1;font-size:11px;color:var(--amber);" onclick="stratCmd('export_csv')">↓ CSV</button>
     </div>
-    <div style="display:flex;gap:7px;align-items:center;margin-bottom:12px;">
-      <button class="btn" style="flex:1;font-size:11px;color:#22d3ee;" onclick="runBacktest()">⟲ Backtest 4d</button>
-      <span id="btStatus" style="font-size:10px;color:var(--dim-2);flex:2;"></span>
+    <!-- Test mode controls -->
+    <div id="modalControlsTest" style="display:none;margin-bottom:10px;">
+      <div style="font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:#22d3ee;margin-bottom:8px;">⚗ Test Mode</div>
+      <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
+        <div style="display:flex;flex-direction:column;gap:3px;flex:1;min-width:120px;">
+          <label style="font-size:9px;color:var(--dim-2);">Start Date *</label>
+          <input type="date" id="btStartDate" style="font-size:11px;padding:5px 8px;width:100%;">
+        </div>
+        <div style="display:flex;flex-direction:column;gap:3px;flex:1;min-width:120px;">
+          <label style="font-size:9px;color:var(--dim-2);">End Date (empty = live handoff)</label>
+          <input type="date" id="btEndDate" style="font-size:11px;padding:5px 8px;width:100%;">
+        </div>
+      </div>
+      <div style="display:flex;gap:7px;margin-bottom:6px;">
+        <button class="btn" style="flex:1;font-size:11px;color:#22d3ee;" onclick="startTestStrategy()">⟲ Backfill + Start</button>
+        <button class="btn" style="flex:1;font-size:11px;" onclick="stratCmd('stop_strategy')">⏸ Pause</button>
+        <button class="btn" style="flex:1;font-size:11px;color:var(--red);" onclick="stratCmd('close_strategy')">✕ Close All</button>
+        <button class="btn" style="flex:1;font-size:11px;color:var(--amber);" onclick="stratCmd('export_csv')">↓ CSV</button>
+      </div>
+      <div id="btStatus" style="font-size:10px;color:var(--dim-2);min-height:14px;"></div>
     </div>
     <div class="strat-modal-desc" id="modalDesc">–</div>
     <div class="strat-modal-sec">Strategy PnL</div>
@@ -407,61 +463,107 @@ function barTypeFor(sym, tf){ return TF_SPEC[tf] ? `${sym}-${TF_SPEC[tf]}-LAST-$
 const sessionStart = Date.now();
 let totalBytes = 0;
 
-// ---------- backtest ----------
-let btMode = false;            // chart showing backtest (vs live)
-const btSeries = {};           // instrument -> {bars:[{t,o,h,l,c,v}], indMap:{ts:{fast_ema,slow_ema}}}
-let btPositions = null;        // {positions, closed_positions, pnl}
+// ---------- mode (live / test) ----------
+let currentMode = "live";
 let _btPoll = null;
-async function runBacktest(){
-  const st=document.getElementById("btStatus");
-  if(!activeModal){ return; }
-  st.textContent="requesting backtest…";
-  try{
-    await fetch("/api/command",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({action:"backtest_strategy", strategy_id:activeModal})});
-  }catch(e){ st.textContent="command failed"; return; }
-  if(_btPoll) clearInterval(_btPoll);
-  _btPoll=setInterval(pollBacktest, 2000);
-  pollBacktest();
+const _lastActive = {};   // mode -> last active symbol, restored on mode switch back
+
+function setMode(m){
+  if(currentMode === m) return;
+  _lastActive[currentMode] = active;   // save before panels are cleared
+  currentMode = m;
+  // update tab UI
+  document.getElementById("modeLive").classList.toggle("active", m==="live");
+  document.getElementById("modeLive").classList.toggle("live", m==="live");
+  document.getElementById("modeTest").classList.toggle("active", m==="test");
+  document.getElementById("modeTest").classList.toggle("test", m==="test");
+  document.getElementById("modeLabel").textContent = m==="live" ? "live trading · DEMO execution" : "testing · testnet execution";
+  document.getElementById("headerTitle").textContent = m==="live" ? "Nautilus · Live" : "Nautilus · Test";
+  // show/hide modal controls
+  const liveCtrl = document.getElementById("modalControlsLive");
+  const testCtrl = document.getElementById("modalControlsTest");
+  if(liveCtrl) liveCtrl.style.display = m==="live" ? "flex" : "none";
+  if(testCtrl) testCtrl.style.display = m==="test" ? "block" : "none";
+  // reset state and reconnect
+  resetState();
+  connectWS();
 }
-async function pollBacktest(){
-  const st=document.getElementById("btStatus");
-  let m; try{ m=await (await fetch("/api/backtest/meta")).json(); }catch(e){ return; }
+
+function resetState(){
+  if(_btPoll){ clearInterval(_btPoll); _btPoll=null; }
+  for(const k in panels) delete panels[k];
+  active = null;
+  lastPortfolio = null;
+  accountSeries = [];
+  accountPeak = ACCOUNT_START;
+  if(_acctPollTimer){ clearInterval(_acctPollTimer); _acctPollTimer=null; }
+  _vcData = []; _vcInited = false; _closedCacheKey = "";
+  // Clear watchlist DOM — old rows reference deleted panels and would crash on click
+  watchRows.clear();
+  const wl = document.getElementById("watchList");
+  if(wl) wl.innerHTML = "";
+  const fc = document.getElementById("fCount");
+  if(fc) fc.textContent = "0";
+  const badge = document.getElementById("btHandoffBadge");
+  if(badge) badge.style.display = "none";
+  const st = document.getElementById("btStatus");
+  if(st) st.textContent = "";
+  render();
+}
+
+async function startTestStrategy(){
+  const st = document.getElementById("btStatus");
+  if(!activeModal){ return; }
+  const startDate = document.getElementById("btStartDate").value;
+  if(!startDate){ st.textContent = "start date required"; return; }
+  const endDate = document.getElementById("btEndDate").value || null;
+  st.textContent = "starting backfill…";
+  try{
+    const r = await fetch(`/api/test/command`, {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({action:"start_test_strategy", strategy_id:activeModal, start_date:startDate, end_date:endDate||""})});
+    if(!r.ok){ st.textContent="command failed ("+r.status+")"; return; }
+  }catch(e){ st.textContent="command failed: "+e.message; return; }
+  if(_btPoll) clearInterval(_btPoll);
+  _btPoll = setInterval(pollTestBacktest, 2000);
+  pollTestBacktest();
+}
+
+async function pollTestBacktest(){
+  const st = document.getElementById("btStatus");
+  let m; try{ m=await (await fetch(`/api/test/backtest/meta`)).json(); }catch(e){ return; }
   if(m.status==="running"){
-    const phase=m.phase==="engine"?"running engine…":`fetching data ${m.done||0}/${m.n||0}`;
-    if(st) st.textContent=phase;
+    const phase = m.phase==="engine" ? "running engine…" : `fetching data ${m.done||0}/${m.n||0}`;
+    if(st) st.textContent = phase;
   } else if(m.status==="done"){
-    if(st){ const p=m.pnl&&Object.values(m.pnl)[0]; const tot=p?p.total:0;
-      st.textContent=`done · ${m.closed} closed · pnl ${fmtSigned(tot||0)}`; }
     if(_btPoll){ clearInterval(_btPoll); _btPoll=null; }
-    await loadBacktestPositions();
-    Object.keys(btSeries).forEach(k=>delete btSeries[k]);   // invalidate cache
-    if(btMode && active){ await loadBacktestSeries(active); render(); }
+    const p = m.pnl && Object.values(m.pnl)[0];
+    const tot = p ? p.total : 0;
+    if(st) st.textContent = `done · ${m.closed||0} closed · pnl ${fmtSigned(tot)}` + (m.live_handoff?" · ▶ live":"");
+    // merge backtest bar history + indicators into chart
+    if(active) await _loadTestChartData(active);
+    // refresh positions
     if(document.getElementById("positionsView").style.display!=="none") renderPositions();
   } else if(m.status==="error"){
-    if(st) st.textContent="error: "+(m.error||"?");
+    if(st) st.textContent = "error: "+(m.error||"?");
     if(_btPoll){ clearInterval(_btPoll); _btPoll=null; }
   }
 }
-async function loadBacktestPositions(){
-  try{ btPositions=await (await fetch("/api/backtest/positions")).json(); }catch(e){ btPositions=null; }
-}
-async function loadBacktestSeries(instrument){
-  if(btSeries[instrument]) return btSeries[instrument];
+
+async function _loadTestChartData(sym){
   try{
-    const d=await (await fetch("/api/backtest/series/"+encodeURIComponent(instrument))).json();
-    const indMap={};
-    for(const pt of (d.indicators||[])){ indMap[Math.floor(pt.ts/60)*60]={fast_ema:pt.fast_ema, slow_ema:pt.slow_ema}; }
-    btSeries[instrument]={bars:d.bars||[], indMap};
-  }catch(e){ btSeries[instrument]={bars:[], indMap:{}}; }
-  return btSeries[instrument];
-}
-async function setBacktestMode(on){
-  btMode=on;
-  document.getElementById("btToggleLive").classList.toggle("active", !on);
-  document.getElementById("btToggleBt").classList.toggle("active", on);
-  if(on){ if(!btPositions) await loadBacktestPositions(); if(active) await loadBacktestSeries(active); }
-  render();
+    const d = await (await fetch(`/api/test/chart_bars/${encodeURIComponent(sym)}`)).json();
+    const barEntries = d && d.bars;
+    if(barEntries && barEntries.length){
+      for(const entry of barEntries){
+        onBarHistory({type:"bar_history", symbol:sym, bar_type:entry.bar_type, bars:entry.bars});
+      }
+      if(d.indicators && d.indicators.length){
+        onIndicatorHistory({symbol:sym, points:d.indicators});
+      }
+      const badge = document.getElementById("btHandoffBadge");
+      if(badge) badge.style.display="inline-block";
+    }
+  }catch(e){}
 }
 
 let ws=null, wsReady=false, pktWS=null;
@@ -472,8 +574,15 @@ let active = null;         // selected symbol
 function setConn(ok){ document.getElementById("connDot").className="live-dot"+(ok?"":" off"); document.getElementById("connTxt").textContent=ok?"connected":"disconnected"; }
 
 function connectWS(){
-  ws = new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host+"/ws");
-  ws.onopen = () => { wsReady=true; setConn(true); for(const s in panels) sub(s, panels[s].window); preopenAll(); };
+  if(ws){ ws.onclose=null; try{ws.close();}catch(e){} ws=null; wsReady=false; }
+  ws = new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host+"/ws?mode="+currentMode);
+  ws.onopen = () => {
+    wsReady=true; setConn(true);
+    for(const s in panels) sub(s, panels[s].window);
+    // Restore the symbol that was active the last time we were in this mode
+    const prev = _lastActive[currentMode];
+    if(prev && !panels[prev]) addSymbol(prev);
+  };
   ws.onclose = () => { wsReady=false; setConn(false); setTimeout(connectWS,1000); };
   ws.onerror = () => { try{ws.close();}catch(e){} };
   ws.onmessage = (e) => {
@@ -561,6 +670,7 @@ function addSymbol(sym){
   sub(sym, DEFAULT_WINDOW);
   document.getElementById("fCount").textContent=Object.keys(panels).length;
   if(!active) selectSymbol(sym);
+  if(currentMode === "test") _loadTestChartData(sym);
 }
 function selectSymbol(sym){
   active=sym;
@@ -568,7 +678,6 @@ function selectSymbol(sym){
   document.getElementById("mSym").textContent=sym;
   document.getElementById("chartEmpty").style.display = panels[sym].ticks.length ? "none":"flex";
   syncRanges(panels[sym].window); syncTfSlider(panels[sym].timeframe); rebuildTape(); render(); updateReadout(panels[sym]);
-  if(btMode) loadBacktestSeries(sym).then(()=>{ if(active===sym) render(); });
 }
 function syncTfSlider(tf){ const i=TIMEFRAMES.indexOf(tf); document.getElementById("tfSlider").value = i<0?0:i; document.getElementById("tfVal").textContent = tf; }
 function updateWatch(sym){
@@ -685,17 +794,15 @@ function draw(){
   const actInds=getActiveInds();
   const isTick=(p.timeframe||"tick")==="tick";
   document.getElementById("oscPanel").style.display = (actInds.rsi||actInds.rvi) ? "block" : "none";
-  // Backtest is always 1-minute candle data (no tick line).
-  if(btMode) drawCandles(ctx,p,w,h,actInds);
-  else if(isTick) drawLine(ctx,p,w,h,actInds);
+  if(isTick) drawLine(ctx,p,w,h,actInds);
   else drawCandles(ctx,p,w,h,actInds);
 }
 
-// Trade markers: triangle at each fill's avg price/time. Long entry = green (up),
-// short entry = red (down), exit/close = grey. Derived from position data
-// (open + closed) for the active instrument.
+// ---------- trade markers ----------
+// lastPortfolio is already filtered to the current mode by the server,
+// so markers automatically show the right set when you switch Live ↔ Test.
 function _tradeMarkers(instrument){
-  const lp = btMode ? btPositions : lastPortfolio;
+  const lp = lastPortfolio;
   if(!lp||!instrument) return [];
   const out=[];
   for(const p of (lp.positions||[])){
@@ -726,9 +833,11 @@ function drawTradeMarkers(ctx,instrument,X,Y,t0,w,ch,snapBars,tfsec){
     if(m.t<t0||m.price==null) continue;
     let t=m.t;
     if(snapBars&&tfsec){
-      // snap to center of the nearest candle
-      const nearest=snapBars.reduce((best,b)=>Math.abs(b.t+tfsec/2-m.t)<Math.abs(best.t+tfsec/2-m.t)?b:best, snapBars[0]);
-      if(nearest) t=nearest.t+tfsec/2;
+      // snap to the bar whose interval [b.t, b.t+tfsec) contains the trade time
+      let snap=snapBars.find(b=>m.t>=b.t && m.t<b.t+tfsec);
+      // fall back to nearest bar center if no exact match (e.g. trade on bar boundary)
+      if(!snap) snap=snapBars.reduce((best,b)=>Math.abs(b.t+tfsec/2-m.t)<Math.abs(best.t+tfsec/2-m.t)?b:best, snapBars[0]);
+      if(snap) t=snap.t+tfsec/2;
     }
     const x=X(t); if(x<0||x>w) continue;
     const y=Y(m.price); if(y<-20||y>ch+20) continue;
@@ -801,14 +910,11 @@ function drawLine(ctx,p,w,h,actInds){
   }
 }
 function drawCandles(ctx,p,w,h,actInds){
-  // Backtest mode: 1-minute klines from the backtest series (close-timed, like
-  // EXTERNAL). Otherwise the live per-timeframe bars.
-  const btS = btMode ? (btSeries[active]||{bars:[]}) : null;
-  const rawAll = btMode ? (btS.bars||[]) : (p.barsByTf[p.timeframe]||[]);
+  const rawAll = p.barsByTf[p.timeframe]||[];
   if(rawAll.length<1){ showEmpty(true); return; } showEmpty(false);
   const ch=h-AXIS_H;
   const wsec=WINDOW_SEC[p.window]||600;
-  const tfsec=btMode ? 60 : (TF_SEC[p.timeframe]||60);
+  const tfsec=TF_SEC[p.timeframe]||60;
   // EXTERNAL Binance klines are timestamped at the bar CLOSE, INTERNAL bars at the
   // OPEN. Positioning is by open time (b.t + tfsec/2 = centre), so normalize
   // EXTERNAL bars by subtracting one interval (else each kline is a slot too far right).
@@ -816,13 +922,10 @@ function drawCandles(ctx,p,w,h,actInds){
   // interval to get the exact aligned OPEN second (12:54:00) — this both positions
   // the candle correctly and matches the indicator keys (which are floored the same
   // way in _mergeIndicators), so overlays line up on minute data.
-  const closeTimed = btMode || ((typeof TF_SOURCE!=="undefined") && TF_SOURCE[p.timeframe]==="EXTERNAL");
+  const closeTimed = (typeof TF_SOURCE!=="undefined") && TF_SOURCE[p.timeframe]==="EXTERNAL";
   const all = closeTimed ? rawAll.map(b=>({...b, t:Math.floor(b.t/tfsec)*tfsec})) : rawAll;
   let allBars;
-  if(btMode){
-    // Backtest is fully historical — no live forming bar.
-    allBars = all;
-  } else {
+  {
     // Append a live forming bar for the current interval, synthesized from this
     // bucket's ticks. Drop any stream bar already in the current bucket (an unclosed
     // kline) so we never draw two candles in the same slot.
@@ -913,15 +1016,15 @@ document.getElementById("chart").addEventListener("wheel", e=>{
   p.offset=Math.max(0, p.offset + step*Math.sign(e.deltaY));
   // Clamp so we can't scroll past the oldest data. Use bars in candle/backtest mode
   // (ticks are a short rolling window and would clamp too early), ticks in tick mode.
-  const isTick = !btMode && p.timeframe==="tick";
+  const isTick = p.timeframe==="tick";
   if(isTick){
     if(p.ticks.length>1){
       const span=p.ticks[p.ticks.length-1].t-p.ticks[0].t;
       p.offset=Math.min(p.offset, Math.max(0, span-wsec));
     } else { p.offset=0; }
   } else {
-    const tfsec=btMode?60:(TF_SEC[p.timeframe]||60);
-    const bars=btMode?(btSeries[active]||{bars:[]}).bars:(p.barsByTf[p.timeframe]||[]);
+    const tfsec=TF_SEC[p.timeframe]||60;
+    const bars=p.barsByTf[p.timeframe]||[];
     if(bars.length>1){
       const span=bars[bars.length-1].t-bars[0].t+tfsec;
       p.offset=Math.min(p.offset, Math.max(0, span-wsec));
@@ -981,7 +1084,11 @@ function onPortfolio(m){
   const setOverall=id=>{ const el=document.getElementById(id); if(!el) return;
     const o=m.overall_pnl||{}; el.textContent=fmtPnl(o);
     const sum=Object.values(o).reduce((a,b)=>a+(b||0),0); el.className="val "+pnlClass(sum); };
-  setOverall("pnlOverall"); setOverall("posOverall");
+  setOverall("pnlOverall");
+  // Overall PnL is only meaningful for live (persisted cross-session); hide in test mode
+  const posOverallTile = document.getElementById("posOverallTile");
+  if(posOverallTile) posOverallTile.style.display = currentMode==="test" ? "none" : "";
+  if(currentMode !== "test") setOverall("posOverall");
   // Strategy list
   const el=document.getElementById("stratList");
   const strats=m.strategies||[];
@@ -1002,10 +1109,10 @@ function onPortfolio(m){
   // Refresh modal if open
   if(activeModal) _populateModal(activeModal);
   // Refresh the Positions tab if it's the active view
-  if(document.getElementById("positionsView").style.display!=="none" && _posActiveTab !== "backtest")
+  if(document.getElementById("positionsView").style.display!=="none")
     renderPositions();
-  // Refresh the Account tab live (append equity point + redraw)
-  if(document.getElementById("accountView").style.display!=="none"){ _acctPushLive(m); renderAccount(); }
+  // Account tab: just redraw the tiles — series is refreshed by its own poll timer
+  if(document.getElementById("accountView").style.display!=="none") renderAccount();
   // Redraw chart so trade markers update immediately (don't wait for next tick)
   if(active) render();
 }
@@ -1015,62 +1122,22 @@ let _posOpenSort = {col:null, dir:1};
 let _posClosedSort = {col:null, dir:1};
 let _posByStrategy = false;
 let _posActiveTab = "open";
+// Cache keys to skip rebuilding closed-position HTML when data hasn't changed.
+let _closedCacheKey = "";      // for global positions tab
+let _closedCacheHTML = "";
+let _modalClosedKey = "";      // for strategy modal history column
+let _modalClosedHTML = "";
 
 function switchPosTab(tab){
   _posActiveTab = tab;
   document.getElementById("posTabOpen").classList.toggle("active", tab==="open");
   document.getElementById("posTabClosed").classList.toggle("active", tab==="closed");
-  document.getElementById("posTabBacktest").classList.toggle("active", tab==="backtest");
   document.getElementById("posOpenPane").style.display = tab==="open" ? "block" : "none";
   document.getElementById("posClosedPane").style.display = tab==="closed" ? "block" : "none";
-  document.getElementById("posBacktestPane").style.display = tab==="backtest" ? "block" : "none";
-  if(tab==="backtest"){
-    loadBacktestPositions().then(()=>{ renderBacktestPositions(); _syncSummaryTiles(); });
-  } else {
-    _syncSummaryTiles();
-  }
+  _syncSummaryTiles();
 }
 function _syncSummaryTiles(){
-  if(_posActiveTab === "backtest"){
-    const bp = btPositions || {positions:[], closed_positions:[], pnl:{}};
-    let uReal=0, real=0, ccy="USDT";
-    for(const p of (bp.positions||[])){ uReal += p.unrealized||0; if(p.ccy) ccy=p.ccy; }
-    for(const p of (bp.closed_positions||[])){ real += p.realized||0; if(p.ccy) ccy=p.ccy; }
-    const total = uReal + real;
-    const setT=(id,v,label)=>{
-      const el=document.getElementById(id);
-      el.textContent = fmtSigned(v)+" "+ccy;
-      el.className = "val "+pnlClass(v);
-      // update the tile label too
-      const lbl = el.previousElementSibling;
-      if(lbl && lbl.classList.contains("lbl")) lbl.textContent = label;
-    };
-    setT("posUnreal", uReal, "bt unrealized");
-    setT("posReal",   real,  "bt realized");
-    setT("posTotal",  total, "bt total");
-  } else {
-    // restore live labels
-    const lbl=(id,txt)=>{ const el=document.getElementById(id); if(el){ const l=el.previousElementSibling; if(l&&l.classList.contains("lbl")) l.textContent=txt; } };
-    lbl("posUnreal","unrealized pnl");
-    lbl("posReal","realized pnl");
-    lbl("posTotal","session pnl");
-    // re-render live values
-    renderPositions();
-  }
-}
-
-function renderBacktestPositions(){
-  const bp=btPositions||{positions:[],closed_positions:[],pnl:{}};
-  const open=bp.positions||[], closed=bp.closed_positions||[];
-  const cntEl=document.getElementById("posBtCount"); if(cntEl) cntEl.textContent=open.length+closed.length;
-  const sumEl=document.getElementById("posBtSummary"); if(!sumEl) return;
-  sumEl.innerHTML=`<span style="color:var(--dim-2);">${open.length} open · ${closed.length} closed</span>`;
-  let html=`<thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Entry Px</th><th>Exit Px</th><th>PnL</th><th>Hold</th></tr></thead><tbody>`;
-  const rowsOpen=open.map(p=>`<tr><td>${(p.instrument||'').split('.')[0]}</td><td>${p.side}</td><td>${fmt(p.qty)}</td><td class="dim">${_fmtDT(p.ts_opened)}</td><td class="dim">—</td><td>${fmt(p.avg_px)}</td><td>—</td><td class="${pnlClass(p.unrealized)}">${fmtSigned(p.unrealized)}</td><td>open</td></tr>`);
-  const rowsClosed=closed.map(p=>`<tr><td>${(p.instrument||'').split('.')[0]}</td><td>${p.side}</td><td>${fmt(p.qty)}</td><td class="dim">${_fmtDT(p.ts_opened)}</td><td class="dim">${_fmtDT(p.ts_closed)}</td><td>${fmt(p.avg_px_open)}</td><td>${fmt(p.avg_px_close)}</td><td class="${pnlClass(p.realized)}">${fmtSigned(p.realized)}</td><td>${_holdMin(p.ts_opened,p.ts_closed)}</td></tr>`);
-  html+=rowsOpen.join("")+rowsClosed.join("")+`</tbody>`;
-  document.getElementById("posBtTable").innerHTML = (open.length+closed.length)?html
-    : '<tbody><tr><td class="pos-empty" style="padding:20px;color:var(--dim-2);">no backtest yet — run one from a strategy popup (⟲ Backtest 4d)</td></tr></tbody>';
+  renderPositions();
 }
 
 function toggleStratView(){
@@ -1086,6 +1153,18 @@ function toggleStratView(){
 function sortPos(table, col){
   const s = table==="open" ? _posOpenSort : _posClosedSort;
   if(s.col===col) s.dir *= -1; else { s.col=col; s.dir=1; }
+  if(table==="closed" && _vcData.length){
+    // Re-sort and repaint without a full renderPositions() round-trip
+    _vcData = _applySortClosed(_vcData);
+    const scroller = document.getElementById("closedVCScroll");
+    if(scroller) scroller.scrollTop = 0;
+    _updateClosedVC();
+    // Rebuild thead so sort arrows update
+    const tbl = document.getElementById("posClosedTable");
+    if(tbl){ const thead = tbl.querySelector("thead"); if(thead) thead.outerHTML = _closedTheadHTML().split("</colgroup>")[1].split("<tbody>")[0]; }
+    _closedCacheKey = "";  // force full rebuild next renderPositions
+    return;
+  }
   renderPositions();
 }
 
@@ -1137,7 +1216,81 @@ function _openTableHTML(open, now){
   return head+"<tbody>"+rows+"</tbody>";
 }
 
+// ---------- Closed positions virtual scroll ----------
+const _VC_ROW_H = 34;   // px — must match td padding in CSS (5px top+bottom + ~11px font + borders ≈ 34)
+let _vcData = [];        // current sorted closed array (global positions tab)
+let _vcInited = false;
+
+function _closedRowHTML(p){
+  const sideCls=p.side==="LONG"?"up":(p.side==="SHORT"?"down":"");
+  return `<tr>
+    <td><b>${p.instrument.split(".")[0]}</b></td><td class="dim">${_stratShort(p.strategy)}</td>
+    <td class="${sideCls}">${p.side}</td><td>${fmtQty(p.qty)}</td>
+    <td class="dim">${_fmtDT(p.ts_opened)}</td><td class="dim">${_fmtDT(p.ts_closed)}</td>
+    <td>${fmt(p.avg_px_open)}</td><td>${fmt(p.avg_px_close)}</td>
+    <td class="${pnlClass(p.realized)}">${fmtSigned(p.realized)} ${p.ccy||""}</td>
+    <td>${_holdMin(p.ts_opened,p.ts_closed)}</td></tr>`;
+}
+
+function _closedTheadHTML(){
+  return `<colgroup>
+    <col style="width:90px"><col style="width:110px"><col style="width:52px">
+    <col style="width:70px"><col style="width:130px"><col style="width:130px">
+    <col style="width:80px"><col style="width:80px">
+    <col style="width:100px"><col style="width:70px">
+  </colgroup><thead><tr>
+    ${_thClosed("Symbol","symbol")}${_thClosed("Strategy","strategy")}${_thClosed("Side","side")}
+    ${_thClosed("Qty","qty")}${_thClosed("Entry","entry")}${_thClosed("Exit","exit")}
+    ${_thClosed("Entry Px","entry_px")}${_thClosed("Exit Px","exit_px")}
+    ${_thClosed("PnL","pnl")}${_thClosed("Hold(m)","hold")}
+  </tr></thead>`;
+}
+
+function _initClosedVC(){
+  if(_vcInited) return;
+  _vcInited = true;
+  const scroller = document.getElementById("closedVCScroll");
+  if(!scroller) return;
+  // Initialise the table structure once
+  const tbl = document.getElementById("posClosedTable");
+  if(tbl) tbl.innerHTML = _closedTheadHTML() + "<tbody id='closedVCBody'></tbody>";
+  scroller.addEventListener("scroll", _updateClosedVC, {passive:true});
+}
+
+function _renderClosedVC(closed){
+  _initClosedVC();
+  _vcData = _applySortClosed(closed);
+  // Reset scroll to top when data changes significantly (sort/filter)
+  const scroller = document.getElementById("closedVCScroll");
+  _updateClosedVC();
+}
+
+function _updateClosedVC(){
+  const scroller = document.getElementById("closedVCScroll");
+  const tbody    = document.getElementById("closedVCBody");
+  if(!scroller || !tbody || !_vcData.length){
+    if(tbody) tbody.innerHTML = `<tr><td colspan="10" class="dim" style="text-align:center;padding:12px;">no closed positions</td></tr>`;
+    return;
+  }
+  const scrollTop = scroller.scrollTop;
+  const viewH     = scroller.clientHeight || 400;
+  const total     = _vcData.length;
+  const OVER      = 40;  // rows of overdraw above/below viewport
+  const startIdx  = Math.max(0, Math.floor(scrollTop / _VC_ROW_H) - OVER);
+  const endIdx    = Math.min(total, Math.ceil((scrollTop + viewH) / _VC_ROW_H) + OVER);
+  const topPx     = startIdx * _VC_ROW_H;
+  const botPx     = Math.max(0, (total - endIdx) * _VC_ROW_H);
+  const rows      = _vcData.slice(startIdx, endIdx).map(_closedRowHTML).join("");
+  tbody.innerHTML =
+    `<tr class="vc-spacer"><td colspan="10" style="height:${topPx}px;padding:0;border:none;"></td></tr>` +
+    rows +
+    `<tr class="vc-spacer"><td colspan="10" style="height:${botPx}px;padding:0;border:none;"></td></tr>`;
+}
+
+// Re-run virtual scroll when sort changes
+const _origSortClosed = sortPos;
 function _closedTableHTML(closed){
+  // Kept for the "by-strategy" sub-tables which are small (one strategy at a time)
   const sideCls=s=>s==="LONG"?"up":(s==="SHORT"?"down":"");
   const head=`<thead><tr>
     ${_thClosed("Symbol","symbol")}${_thClosed("Strategy","strategy")}${_thClosed("Side","side")}
@@ -1163,7 +1316,7 @@ function switchView(view){
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active", t.dataset.view===view));
   if(view==="positions") renderPositions();
   else if(view==="account") openAccount();
-  else render();   // chart may need a redraw after being hidden
+  else { if(_acctPollTimer){ clearInterval(_acctPollTimer); _acctPollTimer=null; } render(); }
 }
 function _fmtDT(ms){
   if(!ms) return "–";
@@ -1175,28 +1328,25 @@ function _stratShort(s){ return (s||"").replace(/-None$/,""); }
 
 // ---------- Account tab ----------
 const ACCOUNT_START = 100000;   // must match ACCOUNT_START_EQUITY (sandbox starting balance)
-let accountSeries = [];         // [{ts, realized, unrealized, total, nav}]
-let accountPeak = ACCOUNT_START; // all-time high-water NAV (from backend) for drawdown
+let accountSeries = [];         // [{ts, realized, unrealized, total, nav}] — server-computed
+let accountPeak = ACCOUNT_START;
+let _acctPollTimer = null;
+
 async function openAccount(){
-  // Refetch the backend equity series (downsampled, continuous, survives restarts)
-  // plus the all-time NAV peak so drawdown is correct beyond the retained window.
+  await _fetchAccountEquity();
+  // Poll the backend every 10s while the tab is open so the graph stays current.
+  // The server computes NAV correctly for each mode; we never derive it in the browser.
+  if(_acctPollTimer) clearInterval(_acctPollTimer);
+  _acctPollTimer = setInterval(_fetchAccountEquity, 10000);
+}
+
+async function _fetchAccountEquity(){
   try{
-    const d = await (await fetch("/api/account/equity")).json();
+    const d = await (await fetch(`/api/${currentMode}/account/equity`)).json();
     accountSeries = (d && d.points) || [];
-    accountPeak = (d && d.peak!=null) ? d.peak : ACCOUNT_START;
+    accountPeak   = (d && d.peak != null) ? d.peak : ACCOUNT_START;
   }catch(e){ if(!Array.isArray(accountSeries)) accountSeries=[]; }
   renderAccount();
-}
-function _acctPushLive(m){
-  let realized=0, unrealized=0;
-  for(const v of Object.values(m.pnl||{})){ realized+=v.realized||0; unrealized+=v.unrealized||0; }
-  const total=realized+unrealized;
-  const pt={ts:m.ts||Date.now(), realized, unrealized, total, nav:ACCOUNT_START+total};
-  if(pt.nav>accountPeak) accountPeak=pt.nav;   // track live new highs
-  const last=accountSeries[accountSeries.length-1];
-  if(last && pt.ts-last.ts < 1000) accountSeries[accountSeries.length-1]=pt;  // coalesce sub-second
-  else accountSeries.push(pt);
-  if(accountSeries.length>20000) accountSeries.shift();
 }
 function renderAccount(){
   // Running PnL numbers (authoritative from the latest portfolio frame).
@@ -1207,21 +1357,33 @@ function renderAccount(){
   setN("acRealized",realized," USDT"); setN("acUnreal",unrealized," USDT"); setN("acOverall",total," USDT");
   const s=Array.isArray(accountSeries)?accountSeries:[];
   if(s.length<1){
-    ["acReturn","acMaxDD"].forEach(id=>{const e=document.getElementById(id); if(e){e.textContent="–"; e.className="val";}});
+    ["acReturn","acPeakNav","acMaxDD"].forEach(id=>{const e=document.getElementById(id); if(e){e.textContent="–"; e.className="val";}});
+    ["acPeakNavTs","acMaxDDTs"].forEach(id=>{const e=document.getElementById(id); if(e) e.textContent="–";});
     ["acNavNow","acRetNow","acDdNow"].forEach(id=>{const e=document.getElementById(id); if(e) e.textContent="–";});
     ["acNavChart","acRetChart","acDdChart"].forEach(id=>{const c=document.getElementById(id); if(c){c.width=c.clientWidth; c.height=c.clientHeight; c.getContext("2d").clearRect(0,0,c.width,c.height);}});
     return;
   }
   const ts=s.map(p=>p.ts), nav=s.map(p=>p.nav);
   const ret=nav.map(v=>(v/ACCOUNT_START-1)*100);
-  // Drawdown vs the all-time high-water mark (seeded from the backend peak so it's
-  // correct even when older peak points fall outside the displayed window).
   let peak=Math.max(accountPeak, ACCOUNT_START);
-  const dd=nav.map(v=>{ if(v>peak)peak=v; return peak>0?(v-peak)/peak*100:0; });
-  const curRet=ret[ret.length-1], curDd=dd[dd.length-1], curNav=nav[nav.length-1], maxDd=Math.min(...dd);
+  let peakTs=null, peakNav=peak;
+  const dd=nav.map((v,i)=>{
+    if(v>peak){ peak=v; peakNav=v; peakTs=ts[i]; }
+    return peak>0?(v-peak)/peak*100:0;
+  });
+  const maxDdVal=Math.min(...dd);
+  const maxDdIdx=dd.indexOf(maxDdVal);
+  const maxDdTs=ts[maxDdIdx];
+  const curRet=ret[ret.length-1], curDd=dd[dd.length-1], curNav=nav[nav.length-1];
+  const fmtTs=ms=>{ if(!ms) return "–"; const d=new Date(ms),pa=n=>String(n).padStart(2,"0");
+    return `${d.getDate()} ${d.toLocaleString("en",{month:"short"})} ${pa(d.getHours())}:${pa(d.getMinutes())}`; };
   const setRun=(id,txt,cls)=>{const e=document.getElementById(id); if(e){e.textContent=txt; if(cls!=null) e.className=cls;}};
+  const setSub=(id,txt)=>{const e=document.getElementById(id); if(e) e.textContent=txt;};
   setRun("acReturn", fmtSigned(curRet)+"%", "val "+pnlClass(curRet));
-  setRun("acMaxDD", maxDd.toFixed(2)+"%", "val down");
+  setRun("acPeakNav", peakNav.toLocaleString(undefined,{maximumFractionDigits:0})+" USDT", "val up");
+  setSub("acPeakNavTs", peakTs ? fmtTs(peakTs) : "–");
+  setRun("acMaxDD", maxDdVal.toFixed(2)+"%", "val down");
+  setSub("acMaxDDTs", maxDdTs ? fmtTs(maxDdTs) : "–");
   setRun("acNavNow", curNav.toLocaleString(undefined,{maximumFractionDigits:0}), "ac-run");
   setRun("acRetNow", fmtSigned(curRet)+"%", "ac-run "+pnlClass(curRet));
   setRun("acDdNow", curDd.toFixed(2)+"%", "ac-run down");
@@ -1254,6 +1416,167 @@ function _acctLine(canvasId, ts, vals, color, opts){
   for(let i=0;i<vals.length;i++){ const x=X(ts[i]), y=Y(vals[i]); if(i===0)ctx.moveTo(x,y); else ctx.lineTo(x,y); }
   ctx.stroke();
 }
+// ---------- Account zoom overlay ----------
+let _acZoom = { kind:null, ts:[], vals:[], color:"", opts:{}, view:{t0:0, t1:0}, dragging:false, dragStartX:0, dragT0:0, dragT1:0 };
+
+function openAcZoom(kind){
+  const s = Array.isArray(accountSeries) ? accountSeries : [];
+  if(s.length < 2) return;
+  const ts = s.map(p=>p.ts);
+  let vals, color, opts, title, fmtVal;
+  const ACCOUNT_START = 100000;
+  let peak = Math.max(accountPeak, ACCOUNT_START);
+  if(kind==="nav"){
+    vals = s.map(p=>p.nav);
+    color = getCss("--blue");
+    opts = {};
+    title = "NAV (USDT)";
+    fmtVal = v => v.toLocaleString(undefined,{maximumFractionDigits:0})+" USDT";
+  } else if(kind==="ret"){
+    vals = s.map(p=>(p.nav/ACCOUNT_START-1)*100);
+    color = vals[vals.length-1]>=0 ? getCss("--green") : getCss("--red");
+    opts = {zero:0};
+    title = "Return %";
+    fmtVal = v => (v>=0?"+":"")+v.toFixed(3)+"%";
+  } else {
+    vals = s.map(p=>{ if(p.nav>peak) peak=p.nav; return peak>0?(p.nav-peak)/peak*100:0; });
+    color = getCss("--red");
+    opts = {fill:true, zero:0};
+    title = "Drawdown % (underwater)";
+    fmtVal = v => v.toFixed(3)+"%";
+  }
+  _acZoom = { kind, ts, vals, color, opts, fmtVal,
+    view:{ t0:ts[0], t1:ts[ts.length-1] },
+    dragging:false, dragStartX:0, dragT0:0, dragT1:0 };
+  document.getElementById("acZoomTitle").textContent = title;
+  document.getElementById("acZoomVal").textContent = fmtVal(vals[vals.length-1]);
+  document.getElementById("acZoomOverlay").classList.add("open");
+  requestAnimationFrame(_drawAcZoom);
+}
+
+function closeAcZoom(){
+  document.getElementById("acZoomOverlay").classList.remove("open");
+}
+
+function _drawAcZoom(){
+  const cv = document.getElementById("acZoomCanvas"); if(!cv) return;
+  const z = _acZoom;
+  if(!z.ts || z.ts.length < 2) return;
+  const dpr = window.devicePixelRatio||1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = w*dpr; cv.height = h*dpr;
+  const ctx = cv.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h);
+
+  // Clamp view bounds
+  const allT0 = z.ts[0], allT1 = z.ts[z.ts.length-1];
+  let vt0 = Math.max(allT0, z.view.t0), vt1 = Math.min(allT1, z.view.t1);
+  if(vt1 <= vt0) { vt0=allT0; vt1=allT1; }
+
+  // Filter points in view (with one point of padding on each side for clean line)
+  const i0 = Math.max(0, z.ts.findIndex(t=>t>=vt0) - 1);
+  const i1_raw = z.ts.findLastIndex(t=>t<=vt1);
+  const i1 = Math.min(z.ts.length-1, i1_raw < 0 ? z.ts.length-1 : i1_raw + 1);
+  const vts = z.ts.slice(i0, i1+1), vvals = z.vals.slice(i0, i1+1);
+  if(vts.length < 2) return;
+
+  const tspan = Math.max(1, vt1-vt0);
+  let lo=Math.min(...vvals), hi=Math.max(...vvals);
+  if(z.opts.zero!=null){ lo=Math.min(lo,z.opts.zero); hi=Math.max(hi,z.opts.zero); }
+  const pad=(hi-lo)*0.08||0.5; lo-=pad; hi+=pad;
+  const X = t => (t-vt0)/tspan*w;
+  const Y = v => h-(v-lo)/(hi-lo)*h;
+
+  // Zero line
+  if(z.opts.zero!=null){
+    ctx.strokeStyle="rgba(90,96,107,0.4)"; ctx.lineWidth=1; ctx.setLineDash([3,4]);
+    ctx.beginPath(); ctx.moveTo(0,Y(z.opts.zero)); ctx.lineTo(w,Y(z.opts.zero)); ctx.stroke(); ctx.setLineDash([]);
+  }
+  // Fill
+  if(z.opts.fill){
+    const zero = z.opts.zero!=null?z.opts.zero:0;
+    ctx.beginPath(); ctx.moveTo(X(vts[0]),Y(zero));
+    for(let i=0;i<vts.length;i++) ctx.lineTo(X(vts[i]),Y(vvals[i]));
+    ctx.lineTo(X(vts[vts.length-1]),Y(zero)); ctx.closePath();
+    ctx.fillStyle="rgba(239,83,80,0.13)"; ctx.fill();
+  }
+  // Line
+  ctx.strokeStyle=z.color; ctx.lineWidth=1.8; ctx.beginPath();
+  for(let i=0;i<vts.length;i++){ const x=X(vts[i]),y=Y(vvals[i]); i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); }
+  ctx.stroke();
+
+  // X-axis time labels
+  ctx.fillStyle=getCss("--dim-2"); ctx.font="10px monospace"; ctx.textAlign="center";
+  const labelCount = Math.floor(w/120);
+  for(let i=0;i<=labelCount;i++){
+    const t = vt0 + (vt1-vt0)*i/labelCount;
+    const x = X(t);
+    const d = new Date(t);
+    const lbl = d.toLocaleDateString("en-GB",{day:"2-digit",month:"short"})+" "+d.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit",hour12:false});
+    ctx.fillText(lbl, x, h-4);
+  }
+  // Y-axis labels
+  ctx.textAlign="left";
+  const ySteps = 5;
+  for(let i=0;i<=ySteps;i++){
+    const v = lo + (hi-lo)*i/ySteps;
+    const y = Y(v);
+    ctx.fillStyle="rgba(90,96,107,0.35)";
+    ctx.fillRect(0,y,w,1);
+    ctx.fillStyle=getCss("--dim-2");
+    ctx.fillText(v.toFixed(z.kind==="nav"?0:2), 4, y-3);
+  }
+}
+
+// Zoom overlay — wheel to zoom, drag to pan
+(function(){
+  function _cv(){ return document.getElementById("acZoomCanvas"); }
+  window.addEventListener("wheel", e=>{
+    if(!document.getElementById("acZoomOverlay").classList.contains("open")) return;
+    if(!_cv().contains(e.target) && e.target!==_cv()) return;
+    e.preventDefault();
+    const z = _acZoom; if(!z.ts||z.ts.length<2) return;
+    const allT0=z.ts[0], allT1=z.ts[z.ts.length-1];
+    const span = Math.max(1, z.view.t1 - z.view.t0);
+    const cv = _cv();
+    const frac = (e.offsetX||cv.clientWidth/2) / cv.clientWidth;
+    const factor = e.deltaY > 0 ? 1.25 : 0.8;
+    const newSpan = Math.min(allT1-allT0, Math.max(60000, span*factor));
+    const anchor = z.view.t0 + span*frac;
+    let t0 = anchor - newSpan*frac, t1 = anchor + newSpan*(1-frac);
+    if(t0 < allT0){ t1 += allT0-t0; t0=allT0; }
+    if(t1 > allT1){ t0 -= t1-allT1; t1=allT1; }
+    z.view.t0 = Math.max(allT0,t0); z.view.t1 = Math.min(allT1,t1);
+    requestAnimationFrame(_drawAcZoom);
+  }, {passive:false});
+
+  document.addEventListener("mousedown", e=>{
+    if(!document.getElementById("acZoomOverlay").classList.contains("open")) return;
+    const cv = _cv(); if(e.target!==cv) return;
+    _acZoom.dragging=true; _acZoom.dragStartX=e.clientX;
+    _acZoom.dragT0=_acZoom.view.t0; _acZoom.dragT1=_acZoom.view.t1;
+    cv.style.cursor="grabbing";
+  });
+  document.addEventListener("mousemove", e=>{
+    const z=_acZoom; if(!z.dragging) return;
+    const cv=_cv(); if(!cv) return;
+    const dx = e.clientX - z.dragStartX;
+    const span = z.dragT1-z.dragT0;
+    const dt = -dx/cv.clientWidth*span;
+    const allT0=z.ts[0], allT1=z.ts[z.ts.length-1];
+    let t0=z.dragT0+dt, t1=z.dragT1+dt;
+    if(t0<allT0){t1+=allT0-t0;t0=allT0;} if(t1>allT1){t0-=t1-allT1;t1=allT1;}
+    z.view.t0=t0; z.view.t1=t1;
+    requestAnimationFrame(_drawAcZoom);
+  });
+  document.addEventListener("mouseup", ()=>{
+    if(_acZoom.dragging){ _acZoom.dragging=false; const cv=_cv(); if(cv) cv.style.cursor="grab"; }
+  });
+  // Resize — redraw if open
+  window.addEventListener("resize", ()=>{ if(document.getElementById("acZoomOverlay").classList.contains("open")) requestAnimationFrame(_drawAcZoom); });
+  // Keyboard close
+  document.addEventListener("keydown", e=>{ if(e.key==="Escape") closeAcZoom(); });
+})();
+
 function renderPositions(){
   const m=lastPortfolio; if(!m) return;
   const open=(m.positions||[]).slice();
@@ -1297,7 +1620,12 @@ function renderPositions(){
     document.getElementById("posByStratView").innerHTML=html||'<div style="color:var(--dim-2);padding:20px;">no positions</div>';
   } else {
     document.getElementById("posOpenTable").innerHTML=_openTableHTML(open,now);
-    document.getElementById("posClosedTable").innerHTML=_closedTableHTML(closed);
+    // Virtual scroll for closed — only rebuild when data or sort actually changes
+    const ck = closed.length+"_"+(closed[0]?.id||"")+"_"+(closed[0]?.ts_closed||"")+"_"+_posClosedSort.col+"_"+_posClosedSort.dir;
+    if(ck !== _closedCacheKey){
+      _closedCacheKey = ck;
+      _renderClosedVC(closed);
+    }
   }
 }
 
@@ -1353,15 +1681,21 @@ function _renderOrdersList(sid){
 async function stratCmd(action){
   if(!activeModal) return;
   // Position-history CSV is written server-side by the node on close_strategy.
-  await fetch("/api/command",{method:"POST",headers:{"Content-Type":"application/json"},
+  await fetch(`/api/${currentMode}/command`,{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({action, strategy_id:activeModal})});
 }
 
 function openStratModal(stratId){
   activeModal=stratId;
-  _resetPosFlash();   // don't flash existing positions on open
+  _modalClosedKey=""; _modalClosedHTML="";  // force rebuild for new strategy
+  _resetPosFlash();
   _populateModal(stratId);
   _renderOrdersList(stratId);
+  // show correct controls for current mode
+  const liveCtrl = document.getElementById("modalControlsLive");
+  const testCtrl = document.getElementById("modalControlsTest");
+  if(liveCtrl) liveCtrl.style.display = currentMode==="live" ? "flex" : "none";
+  if(testCtrl) testCtrl.style.display = currentMode==="test" ? "block" : "none";
   document.getElementById("stratModal").style.display="flex";
 }
 
@@ -1470,18 +1804,35 @@ function _populateModal(stratId){
       <div style="display:flex;justify-content:space-between;margin-top:3px;"><span style="color:var(--dim-2);">total</span><span class="${pnlClass(oTotal)}">${fmtSigned(oTotal)} ${oCcy||"USDT"}</span></div>
     </div>`;
   }
-  const closedHtml=closed.map(p=>{
-    const sideCls=p.side==="LONG"?"up":(p.side==="SHORT"?"down":"");
-    const sym=p.instrument.split(".")[0];
-    const t=p.ts_closed?new Date(p.ts_closed).toLocaleTimeString("en-GB",{hour12:false}):"";
-    const fl=(_flashClosed[p.id]&&_now<_flashClosed[p.id])?" flash-del":"";
-    return `<div class="pos-row closed${fl}">
-      <div style="display:flex;justify-content:space-between;"><b>${sym}</b><span class="${sideCls}">${p.side} ${fmtQty(p.qty)}</span></div>
-      <div style="display:flex;justify-content:space-between;color:var(--dim);margin-top:3px;"><span>in ${fmt(p.avg_px_open)} → out ${fmt(p.avg_px_close)}</span></div>
-      <div style="display:flex;justify-content:space-between;margin-top:3px;"><span style="color:var(--dim-2);">${t}</span><span class="${pnlClass(p.realized)}">${fmtSigned(p.realized)} ${p.ccy}</span></div>
+  const CLOSED_SHOW = 20;
+  // Only rebuild closed rows when the list actually changes (new close or first open).
+  const mck = stratId+"_"+closed.length+"_"+(closed[0]?.id||"")+"_"+(closed[0]?.ts_closed||"");
+  if(mck !== _modalClosedKey){
+    _modalClosedKey = mck;
+    const closedSlice = closed.slice(0, CLOSED_SHOW);
+    _modalClosedHTML = closedSlice.map(p=>{
+      const sideCls=p.side==="LONG"?"up":(p.side==="SHORT"?"down":"");
+      const sym=p.instrument.split(".")[0];
+      const t=p.ts_closed?new Date(p.ts_closed).toLocaleTimeString("en-GB",{hour12:false}):"";
+      return `<div class="pos-row closed">
+        <div style="display:flex;justify-content:space-between;"><b>${sym}</b><span class="${sideCls}">${p.side} ${fmtQty(p.qty)}</span></div>
+        <div style="display:flex;justify-content:space-between;color:var(--dim);margin-top:3px;"><span>in ${fmt(p.avg_px_open)} → out ${fmt(p.avg_px_close)}</span></div>
+        <div style="display:flex;justify-content:space-between;margin-top:3px;"><span style="color:var(--dim-2);">${t}</span><span class="${pnlClass(p.realized)}">${fmtSigned(p.realized)} ${p.ccy}</span></div>
+      </div>`;
+    }).join("");
+  }
+  const closedHtml = _modalClosedHTML;
+  let closedSummaryHtml = "";
+  if(closed.length > 0){
+    let cReal=0, cCcy="";
+    for(const p of closed){ cReal+=p.realized||0; if(!cCcy)cCcy=p.ccy; }
+    closedSummaryHtml=`<div class="pos-row" style="border-color:var(--line);margin-top:4px;">
+      <div style="display:flex;justify-content:space-between;"><b>Closed Positions</b><span>${closed.length}</span></div>
+      <div style="display:flex;justify-content:space-between;margin-top:3px;"><span style="color:var(--dim-2);">total realized</span><span class="${pnlClass(cReal)}">${fmtSigned(cReal)} ${cCcy||"USDT"}</span></div>
+      ${closed.length>CLOSED_SHOW?`<div style="color:var(--dim-2);font-size:10px;margin-top:3px;">showing last ${CLOSED_SHOW} of ${closed.length}</div>`:""}
     </div>`;
-  }).join("");
-  histEl.innerHTML=(openHtml+closedHtml)||'<div class="pos-empty">no positions yet</div>';
+  }
+  histEl.innerHTML=(openHtml+closedHtml+closedSummaryHtml)||'<div class="pos-empty">no positions yet</div>';
 }
 
 // ---------- indicators ----------
@@ -1526,7 +1877,6 @@ function getActiveInds() {
   };
 }
 function getIndData(p) {
-  if (btMode) { const s=btSeries[active]; return (s&&s.indMap)||{}; }
   if (!p || p.timeframe==="tick") return {};
   const spec = TF_SPEC[p.timeframe] ? TF_SPEC[p.timeframe]+"-LAST" : null;
   return spec ? (p.indicators[spec] || {}) : {};
@@ -1662,7 +2012,7 @@ document.getElementById("bfBtn").addEventListener("click", async ()=>{
     ? {action:"backfill", instrument_id:active, start, end:end||null}
     : {action:"backfill", instrument_id:active, bar_type:barTypeFor(active, tf), start, end:end||null};
   try{
-    const r=await fetch("/api/command",{method:"POST",headers:{"Content-Type":"application/json"},
+    const r=await fetch(`/api/${currentMode}/command`,{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify(body)});
     if(!r.ok){ note.textContent="command channel error (server returned "+r.status+")."; return; }
     note.textContent=`backfill sent for ${tf}. fetching…`;

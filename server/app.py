@@ -1,21 +1,11 @@
-"""Dashboard server — pure pass-through between Nautilus' native Redis streams
-and the browser. Performs NO calculations.
+"""Dashboard server — live + test mode separation.
 
-Nautilus' MessageBus (configured with database=redis + encoding="json" +
-stream_per_topic) already publishes every subscribed trade/quote/bar to Redis:
+Live mode : market data + state from LIVE_REDIS_URL (db 0, default).
+Test mode : market data from LIVE_REDIS_URL (shared live feed),
+            state (portfolio / positions / strategy) from TEST_REDIS_URL (db 1).
 
-    key     : {streams_prefix}:trader-{trader_id}:{topic}
-              e.g. stream:trader-TESTER-001:data.trades.BINANCE_FUTURES.ETHUSDT-PERP
-    topics  : data.trades.{venue}.{symbol}
-              data.quotes.{venue}.{symbol}
-              data.bars.{bar_type}
-    payload : one stream field holding the object's JSON to_dict(), e.g. a
-              TradeTick -> {type, instrument_id, price, size, ts_event, ...}
-
-This server discovers those streams by topic pattern (so it doesn't care about
-the exact key prefix), decodes the JSON payload, and forwards. The dashboard's
-symbol vocabulary is the instrument id (symbol.venue). MA / metric panels stay
-blank because nothing produces those — intentional.
+Both modes use identical WebSocket and REST APIs; the ?mode= query param
+selects which backend each client talks to.
 """
 
 import os
@@ -31,68 +21,76 @@ import redis as syncredis
 import redis.asyncio as aioredis
 from redis.exceptions import RedisError
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 load_dotenv()
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+LIVE_REDIS_URL = os.getenv("LIVE_REDIS_URL", os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+TEST_REDIS_URL = os.getenv("TEST_REDIS_URL", "redis://localhost:6379/1")
 HTML_PATH = os.path.join(os.path.dirname(__file__), "dashboard.html")
 
-QUICK_HISTORY_COUNT = 50000   # recent ticks replayed from the retained trade stream
-                              # on (re)connect, so the tick view survives a reload
-HIST_FETCH_CAP = 50000   # max backfilled entries pulled into history (dense tick ranges)
+QUICK_HISTORY_COUNT = 50000
+HIST_FETCH_CAP = 50000
 XREAD_BLOCK_MS = 50
 XREAD_COUNT = 500
 DEFAULT_WINDOW = "10m"
 WINDOWS = {"2m", "10m", "30m", "1h", "4h", "1d", "3d"}
 TRADES_INFIX = ":data.trades."
-COMMAND_STREAM = "dashboard:commands"   # ControlActor polls this (see control_actor.py)
+COMMAND_STREAM = "dashboard:commands"
 STRATEGY_CMDS_STREAM = "dashboard:strategy_cmds"
 STRATEGY_STATES_KEY = "dashboard:strategy_states"
 INDICATORS_PREFIX = "dashboard:indicators:"
 ORDER_EVENTS_KEY = "dashboard:order_events"
 STRATEGY_ACTIONS = {"start_strategy", "stop_strategy", "close_strategy",
-                    "export_csv", "backtest_strategy"}
-BACKTEST_PREFIX = "dashboard:backtest"
+                    "export_csv", "start_test_strategy"}
+BARS_INFIX = ":data.bars."
+HIST_BARS_INFIX = ":historical.data.bars."
+HIST_TRADES_INFIX = ":historical.data.trades."
+
+TIMEFRAMES = {
+    "1s": "1-SECOND", "5s": "5-SECOND", "15s": "15-SECOND",
+    "1m": "1-MINUTE", "5m": "5-MINUTE", "15m": "15-MINUTE", "1h": "1-HOUR",
+}
+TF_SOURCE = {
+    "1s": "INTERNAL", "5s": "INTERNAL", "15s": "INTERNAL",
+    "1m": "EXTERNAL", "5m": "EXTERNAL", "15m": "EXTERNAL", "1h": "EXTERNAL",
+}
 
 app = FastAPI()
-# socket_timeout=None: blocking XREAD must not be killed by a read timeout when
-# data is briefly idle (that was crashing the tail tasks).
-r = aioredis.from_url(REDIS_URL, decode_responses=True, socket_timeout=None, socket_keepalive=True, max_connections=300)
 
-# Backtest serving runs entirely off the async event loop: a dedicated thread
-# pool + its own *sync* Redis client. The ~29k-row backtest payloads are read and
-# passed through (already JSON in Redis) on worker threads, so they never block
-# the live tick/bar/portfolio streams on the event loop.
+# ── Redis connections ────────────────────────────────────────────────────────
+# Market data: always from the live node (shared feed for both UI modes).
+r = aioredis.from_url(
+    LIVE_REDIS_URL, decode_responses=True,
+    socket_timeout=None, socket_keepalive=True, max_connections=300,
+)
+
+# State Redis (portfolio / positions / strategy): one per UI mode.
+_MODE_URLS = {"live": LIVE_REDIS_URL, "test": TEST_REDIS_URL}
+
+r_state: dict[str, aioredis.Redis] = {
+    m: aioredis.from_url(url, decode_responses=True,
+                         socket_timeout=None, socket_keepalive=True, max_connections=100)
+    for m, url in _MODE_URLS.items()
+}
+
+# Sync variants for thread-pool work (backtest serving + portfolio dedup).
+r_sync: dict[str, syncredis.Redis] = {
+    m: syncredis.from_url(url, decode_responses=True)
+    for m, url in _MODE_URLS.items()
+}
+
 _BT_EXEC = ThreadPoolExecutor(max_workers=4, thread_name_prefix="backtest")
-_r_bt = syncredis.from_url(REDIS_URL, decode_responses=True)
-
-# The portfolio broadcast (4x/sec) builds + serializes a snapshot that grows all
-# session (unbounded closed positions). Do that read/parse/serialize on a single
-# worker thread with its own sync client, and dedup with a cheap raw-string check
-# instead of json.dumps(sort_keys) — keeping the live event loop free.
-_PF_EXEC = ThreadPoolExecutor(max_workers=1, thread_name_prefix="portfolio")
-_r_pf = syncredis.from_url(REDIS_URL, decode_responses=True)
+_PF_EXEC = ThreadPoolExecutor(max_workers=2, thread_name_prefix="portfolio")
 
 
-async def _send_command(cmd: dict) -> None:
-    """Publish a command to the engine's command stream; the ControlActor polls it."""
-    await r.xadd(COMMAND_STREAM, {"json": json.dumps(cmd)}, maxlen=1000, approximate=True)
-
-
-async def _send_strategy_command(cmd: dict) -> None:
-    """Publish a strategy control command; the strategy manager thread in binance_data.py polls it."""
-    fields = {k: str(v) for k, v in cmd.items()}
-    await r.xadd(STRATEGY_CMDS_STREAM, fields, maxlen=100, approximate=True)
-
-
-# ── topic <-> symbol helpers ────────────────────────────────────────────────
+# ── helpers ─────────────────────────────────────────────────────────────────
 def symbol_from_trade_key(key: str) -> str | None:
     i = key.find(TRADES_INFIX)
     if i < 0:
         return None
-    suffix = key[i + len(TRADES_INFIX):]          # 'BINANCE_FUTURES.ETHUSDT-PERP'
+    suffix = key[i + len(TRADES_INFIX):]
     venue, _, sym = suffix.partition(".")
     return f"{sym}.{venue}" if sym else None
 
@@ -105,11 +103,6 @@ async def find_trade_key(symbol: str) -> str | None:
     return None
 
 
-# request_trade_ticks (tick backfill) responses stream natively to:
-#   trader-{id}:stream:historical.data.trades.{venue}.{symbol}
-HIST_TRADES_INFIX = ":historical.data.trades."
-
-
 async def find_hist_trade_key(symbol: str) -> str | None:
     sym, _, venue = symbol.rpartition(".")
     pattern = f"*{HIST_TRADES_INFIX}{venue}.{sym}"
@@ -119,50 +112,29 @@ async def find_hist_trade_key(symbol: str) -> str | None:
 
 
 def _to_epoch_seconds(ts) -> float:
-    """ts_event is either ns-int or an ISO8601 string (timestamps_as_iso8601)."""
     if isinstance(ts, (int, float)):
         return float(ts) / 1e9
     s = str(ts)
     if s.isdigit():
         return int(s) / 1e9
-    # ISO8601: 'Z' -> '+00:00'; truncate >6 fractional digits (ns) for fromisoformat
     s = s.replace("Z", "+00:00")
     s = re.sub(r"(\.\d{6})\d+", r"\1", s)
     return datetime.fromisoformat(s).timestamp()
 
 
-def _tick_from_payload(raw_field_value: str) -> dict | None:
+def _tick_from_payload(raw: str) -> dict | None:
     try:
-        d = json.loads(raw_field_value)
-        return {
-            "t": _to_epoch_seconds(d["ts_event"]),   # epoch seconds (true event time)
-            "price": float(d["price"]),
-            "qty": float(d.get("size", 0) or 0),
-        }
+        d = json.loads(raw)
+        return {"t": _to_epoch_seconds(d["ts_event"]), "price": float(d["price"]),
+                "qty": float(d.get("size", 0) or 0)}
     except (KeyError, ValueError, TypeError, json.JSONDecodeError):
         return None
 
 
 def _payload_value(fields: dict) -> str | None:
-    """Nautilus writes the payload under one field; be tolerant of its name."""
     if not fields:
         return None
     return fields.get("payload") or next(iter(fields.values()))
-
-
-# ── candles / timeframes ─────────────────────────────────────────────────────
-# Dashboard timeframe -> Nautilus bar step+unit. "tick" = raw line (no bar).
-# Bars are aggregated INTERNAL (Nautilus builds standard Bars from trades).
-TIMEFRAMES = {
-    "1s": "1-SECOND", "5s": "5-SECOND", "15s": "15-SECOND",
-    "1m": "1-MINUTE", "5m": "5-MINUTE", "15m": "15-MINUTE", "1h": "1-HOUR",
-}
-BARS_INFIX = ":data.bars."
-
-TF_SOURCE = {
-    "1s": "INTERNAL", "5s": "INTERNAL", "15s": "INTERNAL",
-    "1m": "EXTERNAL", "5m": "EXTERNAL", "15m": "EXTERNAL", "1h": "EXTERNAL",
-}
 
 
 def bar_type_for(symbol: str, timeframe: str) -> str | None:
@@ -177,13 +149,6 @@ async def find_bar_key(bar_type: str) -> str | None:
     return None
 
 
-# request_bars (backfill) responses are streamed natively to a SEPARATE topic:
-#   trader-{id}:stream:historical.data.bars.{bar_type}
-# so backfilled candles live here, while live aggregated candles live under
-# data.bars. We merge both for history.
-HIST_BARS_INFIX = ":historical.data.bars."
-
-
 async def find_hist_bar_key(bar_type: str) -> str | None:
     async for key in r.scan_iter(match=f"*{HIST_BARS_INFIX}{bar_type}", count=1000):
         return key
@@ -191,41 +156,36 @@ async def find_hist_bar_key(bar_type: str) -> str | None:
 
 
 def _bar_from_payload(raw: str) -> dict | None:
-    """Decode a Nautilus Bar payload -> {t, o, h, l, c, v}."""
     try:
         d = json.loads(raw)
-        return {
-            "t": _to_epoch_seconds(d["ts_event"]),
-            "o": float(d["open"]), "h": float(d["high"]),
-            "l": float(d["low"]), "c": float(d["close"]),
-            "v": float(d.get("volume", 0) or 0),
-        }
+        return {"t": _to_epoch_seconds(d["ts_event"]),
+                "o": float(d["open"]), "h": float(d["high"]),
+                "l": float(d["low"]), "c": float(d["close"]),
+                "v": float(d.get("volume", 0) or 0)}
     except (KeyError, ValueError, TypeError, json.JSONDecodeError):
         return None
 
 
-# ── client / subscription state ─────────────────────────────────────────────
-clients: dict[WebSocket, set[str]] = {}
+# ── client state ─────────────────────────────────────────────────────────────
+# Market data state (shared — market data is always from the live node).
+clients: dict[WebSocket, str] = {}          # ws -> mode
 symbol_clients: dict[str, set[WebSocket]] = defaultdict(set)
 tail_tasks: dict[str, asyncio.Task] = {}
+hist_tail_tasks: dict[str, asyncio.Task] = {}
+bar_clients: dict[str, set[WebSocket]] = defaultdict(set)
+bar_tail_tasks: dict[str, asyncio.Task] = {}
+hist_bar_tail_tasks: dict[str, asyncio.Task] = {}
+client_bars: dict[WebSocket, set[str]] = defaultdict(set)
+ind_clients: dict[str, set[WebSocket]] = defaultdict(set)
+ind_tail_tasks: dict[str, asyncio.Task] = {}
 _pkt_counts: dict[str, int] = defaultdict(int)
 packet_clients: set[WebSocket] = set()
 
-# Bars: keyed by bar_type string (per symbol+timeframe).
-bar_clients: dict[str, set[WebSocket]] = defaultdict(set)
-bar_tail_tasks: dict[str, asyncio.Task] = {}
-hist_bar_tail_tasks: dict[str, asyncio.Task] = {}   # historical.data.bars tail per bar_type
-client_bars: dict[WebSocket, set[str]] = defaultdict(set)   # ws -> bar_types it watches
-
-# Historical trade ticks (backfill arrivals) — tailed separately so they stream
-# in automatically without the dashboard needing to poll after a backfill request.
-hist_tail_tasks: dict[str, asyncio.Task] = {}
-
-# Per-instrument indicator snapshots published by ControlActor.
-ind_clients: dict[str, set[WebSocket]] = defaultdict(set)
-ind_tail_tasks: dict[str, asyncio.Task] = {}
+# Mode-segregated client sets (for portfolio / order event broadcasts).
+mode_clients: dict[str, set[WebSocket]] = {"live": set(), "test": set()}
 
 
+# ── send helpers ─────────────────────────────────────────────────────────────
 async def _safe_send(ws: WebSocket, payload: dict) -> None:
     try:
         await ws.send_text(json.dumps(payload))
@@ -234,18 +194,28 @@ async def _safe_send(ws: WebSocket, payload: dict) -> None:
 
 
 async def _safe_send_text(ws: WebSocket, text: str) -> None:
-    # Send an already-serialized JSON string (so a broadcast serializes once, not per client).
     try:
         await ws.send_text(text)
     except Exception:
         pass
 
 
+async def _send_command(cmd: dict) -> None:
+    await r.xadd(COMMAND_STREAM, {"json": json.dumps(cmd)}, maxlen=1000, approximate=True)
+
+
+async def _send_strategy_command(cmd: dict, mode: str = "live") -> None:
+    fields = {k: str(v) for k, v in cmd.items()}
+    # Strategy commands always go to DB 0 — that's where binance_data.py listens.
+    # The mode is passed as a field so the node knows which Redis to write results to.
+    fields["mode"] = mode
+    await r_state["live"].xadd(STRATEGY_CMDS_STREAM, fields, maxlen=100, approximate=True)
+
+
+# ── market-data tails (shared, always live Redis) ────────────────────────────
 async def _tail_symbol(symbol: str) -> None:
-    # For a freshly-requested symbol the node may not have created the stream
-    # yet (it just got the subscribe command). Wait for it to appear.
     key = None
-    for _ in range(40):  # up to ~20s
+    for _ in range(40):
         if not symbol_clients.get(symbol):
             return
         key = await find_trade_key(symbol)
@@ -292,13 +262,6 @@ def _ensure_tail(symbol: str) -> None:
 
 
 async def _tail_hist_symbol(symbol: str) -> None:
-    """Tail historical.data.trades.* and stream new backfill ticks as hist_ticks messages.
-
-    The key may not exist until the first backfill runs, so we poll for it
-    indefinitely (every 2s) rather than giving up after N retries.
-    Starting the cursor at '$' ensures we only forward entries that arrive
-    AFTER the initial _send_history call (which already covers older entries).
-    """
     sym, _, venue = symbol.rpartition(".")
     pattern = f"*{HIST_TRADES_INFIX}{venue}.{sym}"
     key = None
@@ -346,8 +309,6 @@ def _ensure_hist_tail(symbol: str) -> None:
 
 
 async def _send_history(ws: WebSocket, symbol: str, window: str) -> None:
-    # Merge backfilled (historical.data.trades) + live (data.trades) ticks,
-    # dedup by (time, price, qty), sort ascending.
     seen: set = set()
     ticks: list[dict] = []
     for finder, cap in ((find_hist_trade_key, HIST_FETCH_CAP), (find_trade_key, QUICK_HISTORY_COUNT)):
@@ -367,17 +328,11 @@ async def _send_history(ws: WebSocket, symbol: str, window: str) -> None:
                     seen.add(k)
                     ticks.append(pt)
     ticks.sort(key=lambda d: d["t"])
-    await _safe_send(ws, {
-        "type": "history", "symbol": symbol, "ticks": ticks,
-        "complete": True, "window": window,
-    })
+    await _safe_send(ws, {"type": "history", "symbol": symbol, "ticks": ticks,
+                          "complete": True, "window": window})
 
 
 async def _tail_bars(symbol: str, bar_type: str) -> None:
-    # Loop until the stream key appears (a 5-minute bar won't close for up to 5 min)
-    # then tail only NEW bars. _send_bar_history already sent the full history so
-    # we seek to the current tail position to avoid replaying old bars and causing
-    # the chart to slowly scroll forward through history.
     key = None
     cursor = "$"
     try:
@@ -387,10 +342,6 @@ async def _tail_bars(symbol: str, bar_type: str) -> None:
                 if key is None:
                     await asyncio.sleep(2.0)
                     continue
-                # Seek to just before the newest entry so we deliver the current
-                # (forming/last-closed) bar and every bar after it — without
-                # replaying the whole history (which would scroll the chart forward).
-                # The browser dedups by timestamp, so re-sending the newest is safe.
                 recent = await r.xrevrange(key, count=2)
                 cursor = recent[1][0] if len(recent) > 1 else "0-0"
             try:
@@ -422,12 +373,6 @@ async def _tail_bars(symbol: str, bar_type: str) -> None:
 
 
 async def _tail_hist_bars(symbol: str, bar_type: str) -> None:
-    # Continuously tail historical.data.bars.{bar_type} so backfilled candles
-    # stream to the browser as they land — mirrors _tail_hist_symbol for trades.
-    # Nautilus publishes aggregated bars here natively (INTERNAL and EXTERNAL),
-    # so no actor-side republish is needed. Start at "0-0" to catch backfill
-    # entries written before this tail found the key; the dashboard dedups bars
-    # by timestamp, so overlap with bar_history is harmless.
     key = None
     cursor = "0-0"
     try:
@@ -473,20 +418,15 @@ def _ensure_bar_tail(symbol: str, bar_type: str) -> None:
 
 
 async def _send_bar_history(ws: WebSocket, symbol: str, bar_type: str) -> None:
-    # Merge backfilled (historical.data.bars) + live (data.bars) candles,
-    # dedup by event time, sort ascending.
     by_t: dict[float, dict] = {}
     for finder in (find_hist_bar_key, find_bar_key):
         key = await finder(bar_type)
         if key is None:
             continue
         try:
-            entries = await r.xrevrange(key, "+", "-", count=HIST_FETCH_CAP)   # newest first
+            entries = await r.xrevrange(key, "+", "-", count=HIST_FETCH_CAP)
         except Exception:
             entries = []
-        # Within one stream, keep the NEWEST entry per bucket (first seen, since
-        # xrevrange is newest-first) — a backfill may publish a bucket twice
-        # (partial then complete); the complete one is newest and must win.
         seen: set = set()
         for _id, fields in entries:
             pv = _payload_value(fields)
@@ -494,15 +434,25 @@ async def _send_bar_history(ws: WebSocket, symbol: str, bar_type: str) -> None:
             if not bar or bar["t"] in seen:
                 continue
             seen.add(bar["t"])
-            by_t[bar["t"]] = bar   # later finder (live) overrides historical for same bucket
+            by_t[bar["t"]] = bar
+    # In test mode, also merge backtest chart bars stored by the backtest runner.
+    # These are stored as JSON arrays under test:chart:{bar_type} in the test Redis.
+    ws_m = clients.get(ws, "live")
+    if ws_m == "test":
+        try:
+            raw = r_sync["test"].get(f"test:chart:{bar_type}")
+            if raw:
+                for bar in json.loads(raw):
+                    t = bar.get("t")
+                    if t and t not in by_t:   # live bars take precedence for same timestamp
+                        by_t[t] = bar
+        except Exception:
+            pass
     bars = [by_t[t] for t in sorted(by_t)]
-    await _safe_send(ws, {
-        "type": "bar_history", "symbol": symbol, "bar_type": bar_type, "bars": bars,
-    })
+    await _safe_send(ws, {"type": "bar_history", "symbol": symbol, "bar_type": bar_type, "bars": bars})
 
 
 def _drop_bars_for_symbol(ws: WebSocket, symbol: str) -> None:
-    """Remove ws from any bar_type belonging to this symbol (timeframe switch/leave)."""
     prefix = f"{symbol}-"
     for bt in [b for b in client_bars.get(ws, set()) if b.startswith(prefix)]:
         client_bars[ws].discard(bt)
@@ -511,8 +461,8 @@ def _drop_bars_for_symbol(ws: WebSocket, symbol: str) -> None:
 
 def _ind_fields_to_point(fields: dict) -> dict | None:
     try:
-        ts  = int(fields["ts"])
-        tf  = fields["tf"]
+        ts = int(fields["ts"])
+        tf = fields["tf"]
         snap = {k: float(v) for k, v in fields.items() if k not in ("ts", "tf")}
         return {"ts": ts, "tf": tf, **snap}
     except (KeyError, ValueError, TypeError):
@@ -532,8 +482,6 @@ async def _send_indicator_history(ws: WebSocket, symbol: str) -> None:
 
 async def _tail_indicators(symbol: str) -> None:
     key = f"{INDICATORS_PREFIX}{symbol}"
-    # Start from 0-0 (stream beginning) so entries written before or during the
-    # subscribe roundtrip are not missed — same pattern as _tail_bars.
     cursor = "0-0"
     try:
         while ind_clients.get(symbol):
@@ -565,6 +513,7 @@ def _ensure_indicator_tail(symbol: str) -> None:
         ind_tail_tasks[symbol] = asyncio.create_task(_tail_indicators(symbol))
 
 
+# ── packet rate loop ─────────────────────────────────────────────────────────
 async def _packet_loop() -> None:
     while True:
         await asyncio.sleep(1.0)
@@ -579,40 +528,109 @@ async def _packet_loop() -> None:
             await _safe_send(ws, frame)
 
 
-async def _portfolio_frame() -> dict | None:
-    # Build the portfolio frame: account snapshot (ControlActor) + each running
-    # strategy's free-form metrics (dashboard:metrics:{id}, strategy-defined).
-    try:
-        raw = await r.get("dashboard:portfolio")
-    except Exception:
-        return None
+# ── portfolio loops (one per mode) ───────────────────────────────────────────
+def _build_portfolio_sync(mode: str, last_sig):
+    # Portfolio always lives in DB 0 (live node). Filter by strategy mode.
+    rc = r_sync["live"]
+    raw = rc.get("dashboard:portfolio")
     if not raw:
-        return None
+        return (None, None)
+    try:
+        states = rc.hgetall(STRATEGY_STATES_KEY)
+    except Exception:
+        states = {}
+    try:
+        mode_map = rc.hgetall("dashboard:strategy_modes")  # sid -> "live"|"test"
+    except Exception:
+        mode_map = {}
+    sig = (raw, tuple(sorted(states.items())), tuple(sorted(mode_map.items())))
+    if sig == last_sig:
+        return (sig, None)
     try:
         snap = json.loads(raw)
     except Exception:
-        return None
-    metrics: dict = {}
-    for sid in snap.get("strategies", []):
+        return (sig, None)
+
+    all_strats = snap.get("strategies", [])
+
+    # Strategy list: always show ALL strategies in both tabs so users can
+    # select and start them regardless of which mode they're currently in.
+    # Positions/PnL are filtered to only show this mode's trades.
+    pos_strats = {sid for sid, m in mode_map.items() if m == mode}
+    untagged   = {sid for sid in all_strats if sid not in mode_map}
+    if mode == "live":
+        pos_visible = pos_strats | untagged   # live + untagged for positions
+    else:
+        pos_visible = pos_strats              # only tagged-test positions
+
+    positions = [p for p in snap.get("positions", []) if p.get("strategy") in pos_visible]
+    closed    = [p for p in snap.get("closed_positions", []) if p.get("strategy") in pos_visible]
+
+    # Recompute PnL from filtered positions only.
+    pnl: dict = {}
+    for p in positions:
+        d = pnl.setdefault(p.get("ccy") or "USDT", {"realized": 0.0, "unrealized": 0.0})
+        d["realized"]   += p.get("realized", 0.0)
+        d["unrealized"] += p.get("unrealized", 0.0)
+    for p in closed:
+        d = pnl.setdefault(p.get("ccy") or "USDT", {"realized": 0.0, "unrealized": 0.0})
+        d["realized"] += p.get("realized", 0.0)
+    for v in pnl.values():
+        v["total"] = v["realized"] + v["unrealized"]
+
+    metrics = {}
+    for sid in all_strats:
         try:
-            mraw = await r.get(f"dashboard:metrics:{sid}")
+            mraw = rc.get(f"dashboard:metrics:{sid}")
             if mraw:
                 metrics[sid] = json.loads(mraw)
         except Exception:
             pass
-    try:
-        strategy_states = await r.hgetall(STRATEGY_STATES_KEY)
-    except Exception:
-        strategy_states = {}
 
-    return {"type": "portfolio", **snap, "metrics": metrics, "strategy_states": strategy_states}
+    merged = {"positions": positions, "closed_positions": closed, "pnl": pnl}
+    if mode == "test":
+        merged = _merge_backtest_into_snap(merged)
+
+    frame = {
+        "type": "portfolio",
+        **snap,
+        "strategies": sorted(all_strats),
+        "positions": merged["positions"],
+        "closed_positions": merged["closed_positions"],
+        "pnl": merged["pnl"],
+        "metrics": metrics,
+        "strategy_states": states,
+    }
+    return (sig, json.dumps(frame))
 
 
-async def _tail_order_events() -> None:
+async def _portfolio_loop(mode: str) -> None:
+    last_sig = None
+    loop = asyncio.get_running_loop()
+    while True:
+        await asyncio.sleep(0.25)
+        ws_set = mode_clients.get(mode, set())
+        if not ws_set:
+            continue
+        try:
+            sig, text = await loop.run_in_executor(
+                _PF_EXEC, _build_portfolio_sync, mode, last_sig)
+        except Exception:
+            continue
+        last_sig = sig
+        if text is None:
+            continue
+        for ws in list(ws_set):
+            await _safe_send_text(ws, text)
+
+
+# ── order events tails (one per mode) ────────────────────────────────────────
+async def _tail_order_events(mode: str) -> None:
+    rc = r_state[mode]
     cursor = "$"
     while True:
         try:
-            results = await r.xread({ORDER_EVENTS_KEY: cursor}, count=100, block=1000)
+            results = await rc.xread({ORDER_EVENTS_KEY: cursor}, count=100, block=1000)
             if not results:
                 continue
             _, entries = results[0]
@@ -630,7 +648,7 @@ async def _tail_order_events() -> None:
                     "price": fields.get("price", ""),
                     "ts": float(fields.get("ts", 0)),
                 }
-                for ws in list(clients):
+                for ws in list(mode_clients.get(mode, ())):
                     await _safe_send(ws, frame)
         except RedisError:
             await asyncio.sleep(0.5)
@@ -640,78 +658,37 @@ async def _tail_order_events() -> None:
             await asyncio.sleep(0.5)
 
 
-def _build_portfolio_sync(last_sig):
-    """Runs on the portfolio thread. Returns (sig, text):
-      - text is the serialized frame to broadcast, or None if unchanged.
-    Dedup signature = (raw snapshot string, strategy states) — both change cheaply
-    (the snapshot's `ts` bumps every write), so no full json.dumps is needed.
-    """
-    raw = _r_pf.get("dashboard:portfolio")
-    if not raw:
-        return (None, None)
-    try:
-        states = _r_pf.hgetall(STRATEGY_STATES_KEY)
-    except Exception:
-        states = {}
-    sig = (raw, tuple(sorted(states.items())))
-    if sig == last_sig:
-        return (sig, None)                       # nothing changed — skip broadcast
-    try:
-        snap = json.loads(raw)
-    except Exception:
-        return (sig, None)
-    metrics = {}
-    for sid in snap.get("strategies", []):
-        try:
-            mraw = _r_pf.get(f"dashboard:metrics:{sid}")
-            if mraw:
-                metrics[sid] = json.loads(mraw)
-        except Exception:
-            pass
-    frame = {"type": "portfolio", **snap, "metrics": metrics, "strategy_states": states}
-    return (sig, json.dumps(frame))
-
-
-async def _portfolio_loop() -> None:
-    # Broadcast the portfolio frame to all clients, only when it changes. All the
-    # read/parse/serialize work happens on _PF_EXEC so the event loop stays free.
-    last_sig = None
-    loop = asyncio.get_running_loop()
-    while True:
-        await asyncio.sleep(0.25)
-        if not clients:
-            continue
-        try:
-            sig, text = await loop.run_in_executor(_PF_EXEC, _build_portfolio_sync, last_sig)
-        except Exception:
-            continue
-        last_sig = sig
-        if text is None:
-            continue
-        for ws in list(clients):
-            await _safe_send_text(ws, text)
-
-
 @app.on_event("startup")
 async def _startup() -> None:
     asyncio.create_task(_packet_loop())
-    asyncio.create_task(_portfolio_loop())
-    asyncio.create_task(_tail_order_events())
+    asyncio.create_task(_portfolio_loop("live"))
+    asyncio.create_task(_portfolio_loop("test"))
+    asyncio.create_task(_tail_order_events("live"))
+    asyncio.create_task(_tail_order_events("test"))
 
 
-# ── WebSocket: market data ──────────────────────────────────────────────────
+# ── WebSocket ────────────────────────────────────────────────────────────────
 @app.websocket("/ws")
-async def ws_endpoint(websocket: WebSocket):
+async def ws_endpoint(websocket: WebSocket, mode: str = Query("live")):
+    if mode not in _MODE_URLS:
+        mode = "live"
     await websocket.accept()
-    clients[websocket] = set()
-    # Send the current portfolio frame once so a fresh client isn't blank
-    # until the next change (the broadcast loop only sends on change).
-    frame = await _portfolio_frame()
-    if frame:
-        await _safe_send(websocket, frame)
-    # Replay recent order events so the client sees history from before it connected.
+    clients[websocket] = mode
+    mode_clients[mode].add(websocket)
+
+    # Send current portfolio snapshot so a fresh client isn't blank.
+    # Always read from DB 0 (live node); _build_portfolio_sync filters by mode.
     try:
-        past = await r.xrevrange(ORDER_EVENTS_KEY, count=500)
+        loop = asyncio.get_running_loop()
+        sig, text = await loop.run_in_executor(_PF_EXEC, _build_portfolio_sync, mode, None)
+        if text:
+            await _safe_send(websocket, json.loads(text))
+    except Exception:
+        pass
+
+    # Replay recent order events (order events live in DB 0 for both modes for now).
+    try:
+        past = await r_state["live"].xrevrange(ORDER_EVENTS_KEY, count=500)
         for _id, fields in reversed(past):
             await _safe_send(websocket, {
                 "type": "order_event",
@@ -725,6 +702,7 @@ async def ws_endpoint(websocket: WebSocket):
             })
     except Exception:
         pass
+
     try:
         while True:
             raw = await websocket.receive_text()
@@ -737,7 +715,7 @@ async def ws_endpoint(websocket: WebSocket):
             if action == "subscribe":
                 window = msg.get("window") if msg.get("window") in WINDOWS else DEFAULT_WINDOW
                 for sym in [s for s in msg.get("symbols", []) if isinstance(s, str)]:
-                    clients[websocket].add(sym)
+                    clients.setdefault(websocket, mode)
                     symbol_clients[sym].add(websocket)
                     ind_clients[sym].add(websocket)
                     await _send_command({"action": "subscribe", "instrument_id": sym})
@@ -746,9 +724,7 @@ async def ws_endpoint(websocket: WebSocket):
                     _ensure_tail(sym)
                     _ensure_hist_tail(sym)
                     _ensure_indicator_tail(sym)
-                    # Subscribe + tail ALL timeframes immediately so switching
-                    # the candle slider is instant (no server roundtrip needed).
-                    for tf, _spec in TIMEFRAMES.items():
+                    for tf in TIMEFRAMES:
                         bt = bar_type_for(sym, tf)
                         if bt:
                             bar_clients[bt].add(websocket)
@@ -764,35 +740,33 @@ async def ws_endpoint(websocket: WebSocket):
                     await _send_history(websocket, sym, window)
 
             elif action == "refresh_bars":
-                # Re-pull bar history (hist + live merged) after an EXTERNAL backfill,
-                # whose request_bars output lands in historical.data.bars (not tailed).
                 sym = msg.get("symbol")
                 bt = msg.get("bar_type")
                 if isinstance(sym, str) and isinstance(bt, str) and websocket in bar_clients.get(bt, ()):
                     await _send_bar_history(websocket, sym, bt)
 
             elif action == "refresh_indicators":
-                # Re-pull full indicator history after a backfill so the browser
-                # receives entries written before the live tail started.
                 sym = msg.get("symbol")
                 if isinstance(sym, str) and websocket in ind_clients.get(sym, ()):
                     await _send_indicator_history(websocket, sym)
 
             elif action == "unsubscribe":
                 for sym in [s for s in msg.get("symbols", []) if isinstance(s, str)]:
-                    clients[websocket].discard(sym)
                     symbol_clients.get(sym, set()).discard(websocket)
                     ind_clients.get(sym, set()).discard(websocket)
                     _drop_bars_for_symbol(websocket, sym)
-            
+
             elif action in STRATEGY_ACTIONS:
-                await _send_strategy_command(msg)
+                ws_mode = clients.get(websocket, "live")
+                await _send_strategy_command(msg, ws_mode)
 
     except WebSocketDisconnect:
         pass
     finally:
-        for sym in clients.pop(websocket, set()):
-            symbol_clients.get(sym, set()).discard(websocket)
+        mode_clients.get(mode, set()).discard(websocket)
+        clients.pop(websocket, None)
+        for sym in list(symbol_clients):
+            symbol_clients[sym].discard(websocket)
             ind_clients.get(sym, set()).discard(websocket)
         for bt in client_bars.pop(websocket, set()):
             bar_clients.get(bt, set()).discard(websocket)
@@ -811,12 +785,9 @@ async def ws_packets(websocket: WebSocket):
         packet_clients.discard(websocket)
 
 
-# ── REST ────────────────────────────────────────────────────────────────────
+# ── REST ─────────────────────────────────────────────────────────────────────
 @app.get("/api/symbols")
 async def symbols():
-    """Full loaded universe from the instrument cache (key ...:instruments:{id}),
-    so the dashboard can browse/subscribe to any symbol load_all brought in.
-    Falls back to active trade streams if the instrument cache is empty."""
     out = set()
     async for key in r.scan_iter(match="*:instruments:*", count=2000):
         _, _, iid = key.partition(":instruments:")
@@ -831,40 +802,25 @@ async def symbols():
 
 
 @app.post("/api/command")
-async def command(cmd: dict):
-    """Dashboard -> engine commands (subscribe / unsubscribe / backfill).
-
-    Published to the COMMAND_STREAM Redis stream; the node's ControlActor polls
-    it and dispatches. Note: 'backfill' won't fully work until bars are
-    re-enabled (the BinanceBar serialization issue) — the command is delivered,
-    but request_bars on -EXTERNAL bars would crash the engine.
-    """
+async def command(cmd: dict, mode: str = "live"):
     if not isinstance(cmd, dict) or "action" not in cmd:
         return JSONResponse({"ok": False, "error": "missing 'action'"}, status_code=400)
     if cmd.get("action") in STRATEGY_ACTIONS:
-        await _send_strategy_command(cmd)
+        await _send_strategy_command(cmd, mode)
     else:
         await _send_command(cmd)
     return JSONResponse({"ok": True, "sent": cmd})
 
 
-# ── Backtest endpoints: served on the _BT_EXEC thread pool (off the event loop),
-#    passing Redis' already-serialized JSON straight through (no parse/reserialize).
-def _bt_meta_sync() -> str:
-    return _r_bt.get(f"{BACKTEST_PREFIX}:meta") or '{"status": "none"}'
-
-
-def _bt_positions_sync() -> str:
-    return (_r_bt.get(f"{BACKTEST_PREFIX}:positions")
-            or '{"positions": [], "closed_positions": [], "pnl": {}}')
-
-
-def _bt_series_sync(instrument: str) -> str:
-    bars = _r_bt.get(f"{BACKTEST_PREFIX}:bars:{instrument}") or "[]"
-    inds = _r_bt.get(f"{BACKTEST_PREFIX}:indicators:{instrument}") or "[]"
-    # Splice pre-serialized arrays directly into the response — no json.loads.
-    return '{"instrument": %s, "bars": %s, "indicators": %s}' % (
-        json.dumps(instrument), bars, inds)
+@app.post("/api/{mode}/command")
+async def command_mode(mode: str, cmd: dict):
+    if not isinstance(cmd, dict) or "action" not in cmd:
+        return JSONResponse({"ok": False, "error": "missing 'action'"}, status_code=400)
+    if cmd.get("action") in STRATEGY_ACTIONS:
+        await _send_strategy_command(cmd, mode)
+    else:
+        await _send_command(cmd)
+    return JSONResponse({"ok": True, "sent": cmd})
 
 
 async def _bt_json(fn, *args) -> Response:
@@ -873,41 +829,191 @@ async def _bt_json(fn, *args) -> Response:
     return Response(content=body, media_type="application/json")
 
 
-@app.get("/api/backtest/meta")
-async def backtest_meta():
-    return await _bt_json(_bt_meta_sync)
+# ── Account equity (per mode) ────────────────────────────────────────────────
+def _account_equity_sync(mode: str) -> str:
+    rc_live = r_sync["live"]   # DB 0 — live node state
+    rc_test = r_sync["test"]   # DB 1 — backtest results
 
+    if mode == "test":
+        # Prepend backtest equity curve (DB 1) then live test points (DB 0).
+        # The live test points start from ACCOUNT_START=100000 since ControlActor
+        # doesn't know the backtest ending NAV. We offset them so the chart is
+        # continuous: live_nav_adjusted = bt_end_nav + (live_nav - ACCOUNT_START).
+        bt_raw = rc_test.get("dashboard:backtest:equity")
+        bt_pts = json.loads(bt_raw) if bt_raw else []
+        live_entries = rc_live.lrange("dashboard:equity:test", 0, -1)
+        live_pts = [json.loads(e) for e in live_entries]
+        bt_end_nav = float(rc_test.get("dashboard:backtest:equity:end_nav") or 100_000)
+        nav_offset = bt_end_nav - 100_000.0
+        if bt_pts and live_pts:
+            bt_end_ts = bt_pts[-1]["ts"]
+            live_pts = [p for p in live_pts if p["ts"] > bt_end_ts]
+        # Apply offset so live portion is continuous with backtest
+        if nav_offset != 0.0:
+            live_pts = [{**p, "nav": round(p["nav"] + nav_offset, 4)} for p in live_pts]
+        all_pts = bt_pts + live_pts
+        peak_val = max((p["nav"] for p in all_pts), default=100_000.0)
+        entries = [json.dumps(p) for p in all_pts]
+        peak = str(peak_val)
+    else:
+        entries = rc_live.lrange("dashboard:equity:live", 0, -1)
+        peak = rc_live.get("dashboard:equity:live:peak") or "null"
 
-@app.get("/api/backtest/positions")
-async def backtest_positions():
-    return await _bt_json(_bt_positions_sync)
-
-
-@app.get("/api/backtest/series/{instrument}")
-async def backtest_series(instrument: str):
-    return await _bt_json(_bt_series_sync, instrument)
-
-
-def _account_equity_sync() -> str:
-    # The equity series is a Redis list of pre-serialized JSON points; the peak is
-    # the all-time high-water NAV (for correct drawdown beyond the retained window).
-    entries = _r_bt.lrange("dashboard:equity", 0, -1)
-    peak = _r_bt.get("dashboard:equity:peak") or "null"
-    # Downsample to ~5000 points so the browser transfers/renders fast on long runs.
     MAXP = 5000
     n = len(entries)
     if n > MAXP:
         stride = n // MAXP + 1
         kept = entries[::stride]
         if kept[-1] != entries[-1]:
-            kept.append(entries[-1])           # always keep the latest point
+            kept.append(entries[-1])
         entries = kept
     return '{"points": [%s], "peak": %s}' % (",".join(entries), peak)
 
 
-@app.get("/api/account/equity")
-async def account_equity():
-    return await _bt_json(_account_equity_sync)
+@app.get("/api/{mode}/account/equity")
+async def account_equity(mode: str):
+    if mode not in _MODE_URLS:
+        mode = "live"
+    return await _bt_json(_account_equity_sync, mode)
+
+
+# ── Backtest meta / positions (test mode only) ────────────────────────────────
+BACKTEST_PREFIX = "dashboard:backtest"
+
+
+def _bt_meta_sync(mode: str) -> str:
+    return r_sync[mode].get(f"{BACKTEST_PREFIX}:meta") or '{"status": "none"}'
+
+
+def _bt_positions_sync(mode: str) -> str:
+    return (r_sync[mode].get(f"{BACKTEST_PREFIX}:positions")
+            or '{"positions": [], "closed_positions": [], "pnl": {}}')
+
+
+@app.get("/api/{mode}/backtest/meta")
+async def backtest_meta(mode: str):
+    if mode not in _MODE_URLS:
+        mode = "live"
+    return await _bt_json(_bt_meta_sync, mode)
+
+
+@app.get("/api/{mode}/backtest/positions")
+async def backtest_positions(mode: str):
+    if mode not in _MODE_URLS:
+        mode = "live"
+    return await _bt_json(_bt_positions_sync, mode)
+
+
+def _positions_sync(mode: str) -> str:
+    """Mode-filtered portfolio: live positions merged with backtest history."""
+    _, text = _build_portfolio_sync(mode, None)
+    live_snap = json.loads(text) if text else {}
+    positions = list(live_snap.get("positions", []))
+    closed    = list(live_snap.get("closed_positions", []))
+    pnl       = dict(live_snap.get("pnl", {}))
+
+    # For test mode, also merge backtest closed positions from the engine run.
+    if mode == "test":
+        try:
+            raw = r_sync["test"].get("dashboard:backtest:positions")
+            if raw:
+                bt = json.loads(raw)
+                bt_closed = bt.get("closed_positions", [])
+                bt_open   = bt.get("positions", [])
+                # Merge: backtest positions first (oldest), live on top
+                existing_ids = {p.get("id") for p in closed}
+                for p in bt_closed:
+                    if p.get("id") not in existing_ids:
+                        closed.append(p)
+                for p in bt_open:
+                    if p.get("id") not in existing_ids:
+                        positions.append(p)
+                # Recompute merged PnL
+                for p in bt_closed:
+                    d = pnl.setdefault(p.get("ccy") or "USDT", {"realized": 0.0, "unrealized": 0.0, "total": 0.0})
+                    d["realized"] += p.get("realized", 0.0)
+                    d["total"]     = d["realized"] + d["unrealized"]
+        except Exception:
+            pass
+
+    closed.sort(key=lambda c: c.get("ts_closed", 0), reverse=True)
+    return json.dumps({"positions": positions, "closed_positions": closed, "pnl": pnl})
+
+
+def _merge_backtest_into_snap(snap: dict) -> dict:
+    """Merge dashboard:backtest:positions (test Redis) into a portfolio snapshot."""
+    try:
+        raw = r_sync["test"].get("dashboard:backtest:positions")
+        if not raw:
+            return snap
+        bt = json.loads(raw)
+        existing_ids = {p.get("id") for p in snap.get("closed_positions", [])}
+        extra_closed = [p for p in bt.get("closed_positions", []) if p.get("id") not in existing_ids]
+        extra_open   = [p for p in bt.get("positions", [])         if p.get("id") not in existing_ids]
+        if not extra_closed and not extra_open:
+            return snap
+        positions = snap.get("positions", []) + extra_open
+        closed    = snap.get("closed_positions", []) + extra_closed
+        closed.sort(key=lambda c: c.get("ts_closed", 0), reverse=True)
+        pnl = dict(snap.get("pnl", {}))
+        for p in extra_closed:
+            d = pnl.setdefault(p.get("ccy") or "USDT", {"realized": 0.0, "unrealized": 0.0})
+            d["realized"] += p.get("realized", 0.0)
+        for p in extra_open:
+            d = pnl.setdefault(p.get("ccy") or "USDT", {"realized": 0.0, "unrealized": 0.0})
+            d["unrealized"] += p.get("unrealized", 0.0)
+        for v in pnl.values():
+            v["total"] = v["realized"] + v["unrealized"]
+        return {**snap, "positions": positions, "closed_positions": closed, "pnl": pnl}
+    except Exception:
+        return snap
+
+
+@app.get("/api/{mode}/positions")
+async def positions(mode: str):
+    if mode not in _MODE_URLS:
+        mode = "live"
+    return await _bt_json(_positions_sync, mode)
+
+
+# ── Test-mode chart bars: refresh bar history for a symbol after backtest ─────
+def _refresh_chart_bars_sync(mode: str, symbol: str) -> str:
+    """Return backtest chart bars (all timeframes) + EMA indicators for a symbol.
+
+    Response shape: {"bars": [{tf, bar_type, bars}], "indicators": [{ts, tf, fast_ema, slow_ema}]}
+    """
+    rc = r_sync["test"]   # backtest data always in DB 1
+    bars_result = []
+    for tf, spec in [("1m", "1-MINUTE"), ("5m", "5-MINUTE"), ("15m", "15-MINUTE"), ("1h", "1-HOUR")]:
+        src = "EXTERNAL"
+        bar_type = f"{symbol}-{spec}-LAST-{src}"
+        key = f"test:chart:{bar_type}"
+        raw = rc.get(key)
+        if raw:
+            try:
+                bars_result.append({"tf": tf, "bar_type": bar_type, "bars": json.loads(raw)})
+            except Exception:
+                pass
+
+    # Backtest EMA indicators (written by backtest_runner as {ts, fast_ema, slow_ema} lists)
+    indicators = []
+    raw_ind = rc.get(f"dashboard:backtest:indicators:{symbol}")
+    if raw_ind:
+        try:
+            for pt in json.loads(raw_ind):
+                pt["tf"] = "1-MINUTE-LAST"   # backtest always runs on 1m bars
+                indicators.append(pt)
+        except Exception:
+            pass
+
+    return json.dumps({"bars": bars_result, "indicators": indicators})
+
+
+@app.get("/api/{mode}/chart_bars/{symbol}")
+async def chart_bars(mode: str, symbol: str):
+    if mode not in _MODE_URLS:
+        mode = "live"
+    return await _bt_json(_refresh_chart_bars_sync, mode, symbol)
 
 
 @app.get("/", response_class=HTMLResponse)

@@ -24,7 +24,8 @@ from trading.strategies.fixed_positions import FixedNotional, FixedNotionalConfi
 from backtest_runner import run_backtest
 
 load_dotenv()
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+REDIS_URL = os.getenv("LIVE_REDIS_URL", os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+TEST_REDIS_URL = os.getenv("TEST_REDIS_URL", "redis://localhost:6379/1")
 STRATEGY_CMDS_STREAM = "dashboard:strategy_cmds"
 
 _strats: dict[str, object] = {}   # str(strategy.id) -> Strategy instance
@@ -32,6 +33,7 @@ _stop_event = threading.Event()
 
 
 STRATEGY_STATES_KEY = "dashboard:strategy_states"
+STRATEGY_MODES_KEY  = "dashboard:strategy_modes"   # strategy_id -> "live" | "test"
 PORTFOLIO_KEY = "dashboard:portfolio"
 EXPORT_DIR = os.getenv("POSITION_EXPORT_DIR", "exports")
 
@@ -40,15 +42,31 @@ def _iso(ms):
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat() if ms else ""
 
 
-def _export_positions_csv(r, sid):
+def _export_positions_csv(r, sid, mode="live"):
     try:
         raw = r.get(PORTFOLIO_KEY)
-        if not raw:
-            print(f"[export] no portfolio snapshot available for {sid}")
-            return
-        snap = json.loads(raw)
+        snap = json.loads(raw) if raw else {}
         open_ = [p for p in snap.get("positions", []) if p.get("strategy") == sid]
         closed = [p for p in snap.get("closed_positions", []) if p.get("strategy") == sid]
+        # For test mode, merge in the backtest engine's closed positions from DB 1.
+        if mode == "test":
+            try:
+                rr = syncredis.Redis.from_url(TEST_REDIS_URL, decode_responses=True)
+                bt_raw = rr.get("dashboard:backtest:positions")
+                rr.close()
+                if bt_raw:
+                    bt = json.loads(bt_raw)
+                    existing = {p.get("id") for p in closed}
+                    for p in bt.get("closed_positions", []):
+                        if p.get("id") not in existing:
+                            closed.append(p)
+                    for p in bt.get("positions", []):
+                        if p.get("id") not in existing:
+                            open_.append(p)
+            except Exception as e:
+                print(f"[export] backtest merge failed: {e}")
+        if not open_ and not closed:
+            print(f"[export] no positions found for {sid}")
         os.makedirs(EXPORT_DIR, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         path = os.path.join(EXPORT_DIR, f"positions_{sid}_{ts}.csv")
@@ -154,28 +172,46 @@ def _strategy_manager(loop):
                         r.hset(STRATEGY_STATES_KEY, sid, "STOPPED")
                         print(f"[strategy_manager] stop scheduled for {sid}")
                     elif action == "start_strategy":
+                        r.hset(STRATEGY_MODES_KEY, sid, "live")
                         loop.call_soon_threadsafe(_arm(strat))
                         loop.call_soon_threadsafe(_safe_call(strat.reset, f"reset({sid})"))
                         loop.call_soon_threadsafe(_safe_call(strat.start, f"start({sid})"))
                         r.hset(STRATEGY_STATES_KEY, sid, "RUNNING")
                         print(f"[strategy_manager] start scheduled for {sid}")
                     elif action == "export_csv":
-                        _export_positions_csv(r, sid)
+                        _export_positions_csv(r, sid, mode=fields.get("mode", "live"))
                         print(f"[strategy_manager] CSV exported for {sid}")
-                    elif action == "backtest_strategy":
-                        # Run a 4-day BacktestEngine for this strategy in a background
-                        # thread; results land in dashboard:backtest:* (separate from live).
-                        def _run_bt(sid=sid, strat=strat):
-                            rr = syncredis.Redis.from_url(REDIS_URL, decode_responses=True)
+                    elif action in ("backtest_strategy", "start_test_strategy"):
+                        start_date = fields.get("start_date") or None
+                        end_date   = fields.get("end_date")   or None
+                        r.hset(STRATEGY_MODES_KEY, sid, "test")
+                        do_live = (action == "start_test_strategy" and not end_date)
+                        print(f"[strategy_manager] backtest queued for {sid} start={start_date} end={end_date} live_handoff={do_live}")
+                        # Run BacktestEngine for historical positions/PnL/chart bars
+                        # using our throttled _fetch_klines (not Nautilus HTTP client).
+                        # After it finishes, optionally start the live strategy with
+                        # the normal short EMA warmup (slow_ema * 2 bars only).
+                        def _run_bt(sid=sid, strat=strat, sd=start_date, ed=end_date, live=do_live):
+                            rr = syncredis.Redis.from_url(TEST_REDIS_URL, decode_responses=True)
                             try:
                                 insts = [node.cache.instrument(iid)
                                          for iid in strat.config.instrument_ids]
                                 insts = [i for i in insts if i is not None]
-                                run_backtest(rr, strat, insts, days=4)
+                                run_backtest(rr, strat, insts, start_date=sd, end_date=ed)
+                                if live:
+                                    # Hand off to live: short warmup only (slow_ema*2
+                                    # bars via Nautilus HTTP, well within rate limits).
+                                    loop.call_soon_threadsafe(_arm(strat))
+                                    loop.call_soon_threadsafe(
+                                        _safe_call(strat.reset, f"handoff-reset({sid})"))
+                                    loop.call_soon_threadsafe(
+                                        _safe_call(strat.start, f"handoff-start({sid})"))
+                                    rr.hset(STRATEGY_STATES_KEY, sid, "RUNNING")
+                                    print(f"[strategy_manager] live handoff started for {sid}")
                             finally:
                                 rr.close()
                         threading.Thread(target=_run_bt, daemon=True).start()
-                        print(f"[strategy_manager] backtest started for {sid}")
+                        print(f"[strategy_manager] backtest thread started for {sid}")
                     elif action == "close_strategy":
                         loop.call_soon_threadsafe(_disarm(strat))
                         loop.call_soon_threadsafe(_safe_call(_cancel_all(strat), f"cancel-orders({sid})"))
@@ -192,7 +228,8 @@ def _strategy_manager(loop):
                                 loop.call_soon_threadsafe(
                                     _safe_call(_close_all(strat), f"retry-close({sid})")
                                 )
-                            _export_positions_csv(r, sid)
+                            mode_tag = r.hget(STRATEGY_MODES_KEY, sid) or "live"
+                            _export_positions_csv(r, sid, mode=mode_tag)
                             loop.call_soon_threadsafe(_safe_call(strat.stop, f"stop({sid})"))
                             print(f"[strategy_manager] all positions closed, stopped {sid}")
                         threading.Thread(target=_drain_and_stop, daemon=True).start()
