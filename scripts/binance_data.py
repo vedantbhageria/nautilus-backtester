@@ -21,6 +21,7 @@ from trading.actors.control_actor import ControlActor, ControlActorConfig
 from trading.strategies.EMACross import EMACross, EMACrossConfig
 from trading.strategies.EMACrossShortTest import EMACrossStopReverse, EMACrossSARConfig
 from trading.strategies.fixed_positions import FixedNotional, FixedNotionalConfig, STRATEGY_SET
+from backtest_runner import run_backtest
 
 load_dotenv()
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
@@ -40,11 +41,6 @@ def _iso(ms):
 
 
 def _export_positions_csv(r, sid):
-    """Write the strategy's full position history to a CSV on the node machine.
-
-    Reads the ControlActor's portfolio snapshot (which retains the whole session's
-    closed positions), so it's strategy-agnostic and independent of any browser.
-    """
     try:
         raw = r.get(PORTFOLIO_KEY)
         if not raw:
@@ -166,6 +162,20 @@ def _strategy_manager(loop):
                     elif action == "export_csv":
                         _export_positions_csv(r, sid)
                         print(f"[strategy_manager] CSV exported for {sid}")
+                    elif action == "backtest_strategy":
+                        # Run a 4-day BacktestEngine for this strategy in a background
+                        # thread; results land in dashboard:backtest:* (separate from live).
+                        def _run_bt(sid=sid, strat=strat):
+                            rr = syncredis.Redis.from_url(REDIS_URL, decode_responses=True)
+                            try:
+                                insts = [node.cache.instrument(iid)
+                                         for iid in strat.config.instrument_ids]
+                                insts = [i for i in insts if i is not None]
+                                run_backtest(rr, strat, insts, days=4)
+                            finally:
+                                rr.close()
+                        threading.Thread(target=_run_bt, daemon=True).start()
+                        print(f"[strategy_manager] backtest started for {sid}")
                     elif action == "close_strategy":
                         loop.call_soon_threadsafe(_disarm(strat))
                         loop.call_soon_threadsafe(_safe_call(_cancel_all(strat), f"cancel-orders({sid})"))
@@ -260,7 +270,7 @@ _ema_SAR = EMACrossStopReverse(EMACrossSARConfig(
     trade_usd=Decimal("2000"),
     bar_spec="1-MINUTE-LAST",   # 5-second bars per instrument
     fast_ema_period=5,  
-    slow_ema_period=15,
+    slow_ema_period=10,
 ))
 
 node.trader.add_strategy(_ema)

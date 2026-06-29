@@ -166,6 +166,35 @@ class EMACross(Strategy):
     def on_order_canceled(self, event) -> None:
         self._publish_order_event("canceled", event.instrument_id)
 
+    def _publish_indicator(self, bar: Bar, fast_v: float, slow_v: float) -> None:
+        # Push this strategy's (warmed-up) EMAs into the dashboard indicator stream
+        # so the chart draws them directly (no cold-start recompute in ControlActor).
+        if self._redis is None:
+            return
+        try:
+            self._redis.xadd(
+                f"dashboard:indicators:{bar.bar_type.instrument_id}",
+                {
+                    "ts": str(bar.ts_event // 1_000_000_000),
+                    "tf": str(bar.bar_type.spec),
+                    "fast_ema": str(round(fast_v, 6)),
+                    "slow_ema": str(round(slow_v, 6)),
+                },
+                maxlen=50000, approximate=True,
+            )
+        except Exception:
+            pass
+
+    def on_historical_data(self, data) -> None:
+        bars = data if isinstance(data, list) else [data]
+        for bar in bars:
+            if not isinstance(bar, Bar):
+                continue
+            fast = self._fast.get(bar.bar_type.instrument_id)
+            slow = self._slow.get(bar.bar_type.instrument_id)
+            if fast and slow and fast.initialized and slow.initialized:
+                self._publish_indicator(bar, fast.value, slow.value)
+
     def on_bar(self, bar: Bar):
         if not self._active:
             return
@@ -190,6 +219,7 @@ class EMACross(Strategy):
             "description": self._description(),
             "emas": self._ema_snapshot,
         })
+        self._publish_indicator(bar, fast.value, slow.value)
 
         if fast.value >= slow.value:
             if self.portfolio.is_flat(iid):

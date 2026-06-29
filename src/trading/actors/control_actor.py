@@ -22,6 +22,11 @@ COMMAND_STREAM = "dashboard:commands"
 PORTFOLIO_KEY = "dashboard:portfolio"
 STRATEGY_SET = "dashboard:strategies"
 INDICATORS_PREFIX = "dashboard:indicators:"
+EQUITY_KEY = "dashboard:equity"                       # account equity time-series (list)
+EQUITY_PEAK_KEY = "dashboard:equity:peak"             # all-time high-water NAV (for drawdown)
+_ACCOUNT_START = float(os.getenv("ACCOUNT_START_EQUITY", "100000"))  # sandbox starting balance
+_EQUITY_INTERVAL_MS = 5000                            # record one equity point every 5s
+_EQUITY_CAP = 100000                                  # ~5.8 days at 5s; persists across restarts
 OVERALL_PNL_KEY = "dashboard:overall_pnl"   # persisted cumulative realized PnL across sessions
 
 
@@ -37,6 +42,8 @@ class ControlActor(Actor):
         self._redis = None
         self._cmd_cursor = "$"
         self._indicators: dict[str, dict] = {}       # "{instrument_id}:{spec}" -> indicator instances
+        self._last_equity_ms = 0                     # last time an equity point was recorded
+        self._equity_peak = _ACCOUNT_START           # all-time high-water NAV (for drawdown)
         # Closed positions copied out of the cache before it purges them (~1 min),
         # so the dashboard's closed-positions list stays stable. position_id -> record.
         self._closed_positions: dict[str, dict] = {}
@@ -66,6 +73,14 @@ class ControlActor(Actor):
                     self._overall_base = {k: float(v) for k, v in json.loads(raw).items()}
             except Exception:
                 self._overall_base = {}
+            # Restore the all-time NAV peak so drawdown is measured against the
+            # true high-water mark across restarts (not just the retained window).
+            try:
+                pk = self._redis.get(EQUITY_PEAK_KEY)
+                if pk is not None:
+                    self._equity_peak = max(self._equity_peak, float(pk))
+            except Exception:
+                pass
             self.clock.set_timer(
                 name="poll_commands",
                 interval=timedelta(milliseconds=self.config.command_poll_ms),
@@ -153,6 +168,29 @@ class ControlActor(Actor):
                 d["realized"] += c["realized"]
             for v in pnl.values():
                 v["total"] = v["realized"] + v["unrealized"]
+            # Record an account equity point (throttled) for the account view's
+            # NAV / return / drawdown charts. Summed across currencies (USDT here).
+            now_ms = int(self.clock.timestamp_ns() // 1_000_000)
+            if now_ms - self._last_equity_ms >= _EQUITY_INTERVAL_MS:
+                self._last_equity_ms = now_ms
+                realized = sum(v["realized"] for v in pnl.values())
+                unrealized = sum(v["unrealized"] for v in pnl.values())
+                total = realized + unrealized
+                nav = _ACCOUNT_START + total
+                if nav > self._equity_peak:
+                    self._equity_peak = nav
+                try:
+                    self._redis.rpush(EQUITY_KEY, json.dumps({
+                        "ts": now_ms,
+                        "realized": round(realized, 4),
+                        "unrealized": round(unrealized, 4),
+                        "total": round(total, 4),
+                        "nav": round(nav, 4),
+                    }))
+                    self._redis.ltrim(EQUITY_KEY, -_EQUITY_CAP, -1)
+                    self._redis.set(EQUITY_PEAK_KEY, self._equity_peak)
+                except Exception:
+                    pass
             # Overall (cross-session) PnL = persisted base + this session's realized.
             # Written back each tick so on the next restart it becomes the new base
             # (the session's realized PnL is "banked"). Session PnL stays in `pnl`.
@@ -187,7 +225,8 @@ class ControlActor(Actor):
         if key not in self._indicators:
             self._indicators[key] = {
                 "sma":  SimpleMovingAverage(20),
-                "ema":  ExponentialMovingAverage(20),
+                # fast/slow EMA come from the strategy (warmed up) via the same
+                # indicator stream — not recomputed here (would cold-start).
                 "rsi":  RelativeStrengthIndex(14),
                 "vwap": VolumeWeightedAveragePrice(),
                 "bb":   BollingerBands(20, 2.0),
@@ -209,7 +248,6 @@ class ControlActor(Actor):
         fields: dict[str, str] = {"ts": str(bar.ts_event // 1_000_000_000), "tf": spec}
         try:
             if inds["sma"].initialized:  fields["sma"]  = str(round(inds["sma"].value, 6))
-            if inds["ema"].initialized:  fields["ema"]  = str(round(inds["ema"].value, 6))
             if inds["rsi"].initialized:  fields["rsi"]  = str(round(inds["rsi"].value, 4))
             if inds["vwap"].initialized: fields["vwap"] = str(round(inds["vwap"].value, 6))
             if inds["bb"].initialized:
@@ -317,9 +355,6 @@ class ControlActor(Actor):
         self.request_trade_ticks(instrument_id, start=start_dt, end=end_dt, update_catalog=False)
 
     def on_historical_data(self, data) -> None:
-        # Nautilus streams aggregated bars natively to historical.data.bars, which
-        # the dashboard now tails continuously — so no republish is needed here.
-        # We only feed the indicator overlays (a custom dashboard feature).
         if isinstance(data, Bar):
             self._feed_and_publish_indicator(data)
         elif isinstance(data, list) and data and isinstance(data[0], Bar):

@@ -25,12 +25,14 @@ import asyncio
 import time
 from datetime import datetime
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
+import redis as syncredis
 import redis.asyncio as aioredis
 from redis.exceptions import RedisError
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 load_dotenv()
 
@@ -50,12 +52,28 @@ STRATEGY_CMDS_STREAM = "dashboard:strategy_cmds"
 STRATEGY_STATES_KEY = "dashboard:strategy_states"
 INDICATORS_PREFIX = "dashboard:indicators:"
 ORDER_EVENTS_KEY = "dashboard:order_events"
-STRATEGY_ACTIONS = {"start_strategy", "stop_strategy", "close_strategy"}
+STRATEGY_ACTIONS = {"start_strategy", "stop_strategy", "close_strategy",
+                    "export_csv", "backtest_strategy"}
+BACKTEST_PREFIX = "dashboard:backtest"
 
 app = FastAPI()
 # socket_timeout=None: blocking XREAD must not be killed by a read timeout when
 # data is briefly idle (that was crashing the tail tasks).
 r = aioredis.from_url(REDIS_URL, decode_responses=True, socket_timeout=None, socket_keepalive=True, max_connections=300)
+
+# Backtest serving runs entirely off the async event loop: a dedicated thread
+# pool + its own *sync* Redis client. The ~29k-row backtest payloads are read and
+# passed through (already JSON in Redis) on worker threads, so they never block
+# the live tick/bar/portfolio streams on the event loop.
+_BT_EXEC = ThreadPoolExecutor(max_workers=4, thread_name_prefix="backtest")
+_r_bt = syncredis.from_url(REDIS_URL, decode_responses=True)
+
+# The portfolio broadcast (4x/sec) builds + serializes a snapshot that grows all
+# session (unbounded closed positions). Do that read/parse/serialize on a single
+# worker thread with its own sync client, and dedup with a cheap raw-string check
+# instead of json.dumps(sort_keys) — keeping the live event loop free.
+_PF_EXEC = ThreadPoolExecutor(max_workers=1, thread_name_prefix="portfolio")
+_r_pf = syncredis.from_url(REDIS_URL, decode_responses=True)
 
 
 async def _send_command(cmd: dict) -> None:
@@ -211,6 +229,14 @@ ind_tail_tasks: dict[str, asyncio.Task] = {}
 async def _safe_send(ws: WebSocket, payload: dict) -> None:
     try:
         await ws.send_text(json.dumps(payload))
+    except Exception:
+        pass
+
+
+async def _safe_send_text(ws: WebSocket, text: str) -> None:
+    # Send an already-serialized JSON string (so a broadcast serializes once, not per client).
+    try:
+        await ws.send_text(text)
     except Exception:
         pass
 
@@ -614,22 +640,56 @@ async def _tail_order_events() -> None:
             await asyncio.sleep(0.5)
 
 
+def _build_portfolio_sync(last_sig):
+    """Runs on the portfolio thread. Returns (sig, text):
+      - text is the serialized frame to broadcast, or None if unchanged.
+    Dedup signature = (raw snapshot string, strategy states) — both change cheaply
+    (the snapshot's `ts` bumps every write), so no full json.dumps is needed.
+    """
+    raw = _r_pf.get("dashboard:portfolio")
+    if not raw:
+        return (None, None)
+    try:
+        states = _r_pf.hgetall(STRATEGY_STATES_KEY)
+    except Exception:
+        states = {}
+    sig = (raw, tuple(sorted(states.items())))
+    if sig == last_sig:
+        return (sig, None)                       # nothing changed — skip broadcast
+    try:
+        snap = json.loads(raw)
+    except Exception:
+        return (sig, None)
+    metrics = {}
+    for sid in snap.get("strategies", []):
+        try:
+            mraw = _r_pf.get(f"dashboard:metrics:{sid}")
+            if mraw:
+                metrics[sid] = json.loads(mraw)
+        except Exception:
+            pass
+    frame = {"type": "portfolio", **snap, "metrics": metrics, "strategy_states": states}
+    return (sig, json.dumps(frame))
+
+
 async def _portfolio_loop() -> None:
-    # Broadcast the portfolio frame to all clients, only when it changes.
-    last = None
+    # Broadcast the portfolio frame to all clients, only when it changes. All the
+    # read/parse/serialize work happens on _PF_EXEC so the event loop stays free.
+    last_sig = None
+    loop = asyncio.get_running_loop()
     while True:
         await asyncio.sleep(0.25)
         if not clients:
             continue
-        frame = await _portfolio_frame()
-        if frame is None:
+        try:
+            sig, text = await loop.run_in_executor(_PF_EXEC, _build_portfolio_sync, last_sig)
+        except Exception:
             continue
-        key = json.dumps(frame, sort_keys=True)
-        if key == last:
+        last_sig = sig
+        if text is None:
             continue
-        last = key
         for ws in list(clients):
-            await _safe_send(ws, frame)
+            await _safe_send_text(ws, text)
 
 
 @app.on_event("startup")
@@ -724,6 +784,9 @@ async def ws_endpoint(websocket: WebSocket):
                     symbol_clients.get(sym, set()).discard(websocket)
                     ind_clients.get(sym, set()).discard(websocket)
                     _drop_bars_for_symbol(websocket, sym)
+            
+            elif action in STRATEGY_ACTIONS:
+                await _send_strategy_command(msg)
 
     except WebSocketDisconnect:
         pass
@@ -783,6 +846,68 @@ async def command(cmd: dict):
     else:
         await _send_command(cmd)
     return JSONResponse({"ok": True, "sent": cmd})
+
+
+# ── Backtest endpoints: served on the _BT_EXEC thread pool (off the event loop),
+#    passing Redis' already-serialized JSON straight through (no parse/reserialize).
+def _bt_meta_sync() -> str:
+    return _r_bt.get(f"{BACKTEST_PREFIX}:meta") or '{"status": "none"}'
+
+
+def _bt_positions_sync() -> str:
+    return (_r_bt.get(f"{BACKTEST_PREFIX}:positions")
+            or '{"positions": [], "closed_positions": [], "pnl": {}}')
+
+
+def _bt_series_sync(instrument: str) -> str:
+    bars = _r_bt.get(f"{BACKTEST_PREFIX}:bars:{instrument}") or "[]"
+    inds = _r_bt.get(f"{BACKTEST_PREFIX}:indicators:{instrument}") or "[]"
+    # Splice pre-serialized arrays directly into the response — no json.loads.
+    return '{"instrument": %s, "bars": %s, "indicators": %s}' % (
+        json.dumps(instrument), bars, inds)
+
+
+async def _bt_json(fn, *args) -> Response:
+    loop = asyncio.get_running_loop()
+    body = await loop.run_in_executor(_BT_EXEC, fn, *args)
+    return Response(content=body, media_type="application/json")
+
+
+@app.get("/api/backtest/meta")
+async def backtest_meta():
+    return await _bt_json(_bt_meta_sync)
+
+
+@app.get("/api/backtest/positions")
+async def backtest_positions():
+    return await _bt_json(_bt_positions_sync)
+
+
+@app.get("/api/backtest/series/{instrument}")
+async def backtest_series(instrument: str):
+    return await _bt_json(_bt_series_sync, instrument)
+
+
+def _account_equity_sync() -> str:
+    # The equity series is a Redis list of pre-serialized JSON points; the peak is
+    # the all-time high-water NAV (for correct drawdown beyond the retained window).
+    entries = _r_bt.lrange("dashboard:equity", 0, -1)
+    peak = _r_bt.get("dashboard:equity:peak") or "null"
+    # Downsample to ~5000 points so the browser transfers/renders fast on long runs.
+    MAXP = 5000
+    n = len(entries)
+    if n > MAXP:
+        stride = n // MAXP + 1
+        kept = entries[::stride]
+        if kept[-1] != entries[-1]:
+            kept.append(entries[-1])           # always keep the latest point
+        entries = kept
+    return '{"points": [%s], "peak": %s}' % (",".join(entries), peak)
+
+
+@app.get("/api/account/equity")
+async def account_equity():
+    return await _bt_json(_account_equity_sync)
 
 
 @app.get("/", response_class=HTMLResponse)

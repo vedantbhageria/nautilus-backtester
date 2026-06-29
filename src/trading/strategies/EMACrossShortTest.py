@@ -46,6 +46,7 @@ class EMACrossSARConfig(StrategyConfig, frozen=True):
     bar_spec: str = "10-TICK-LAST"   # 10-tick bars, aggregated internally from trades
     fast_ema_period: int = 5
     slow_ema_period: int = 20
+    backtest: bool = False   # run inside a BacktestEngine (no live Redis/quotes/warmup)
 
 
 class EMACrossStopReverse(Strategy):
@@ -72,6 +73,21 @@ class EMACrossStopReverse(Strategy):
         self._active = False
 
     def on_start(self):
+        # Backtest mode: bars are supplied by the engine; just register indicators
+        # and subscribe. No Redis, no quote subscription, no warmup request — the
+        # 4 days of historical bars warm the EMAs naturally, and the runner extracts
+        # positions/EMA afterwards (so no per-bar Redis writes during the run).
+        if getattr(self.config, "backtest", False):
+            self._active = True
+            self._redis = None
+            for iid in self.config.instrument_ids:
+                bt = self._bar_types[iid]
+                self.register_indicator_for_bars(bt, self._fast[iid])
+                self.register_indicator_for_bars(bt, self._slow[iid])
+                self.subscribe_bars(bt)
+            self.log.info(f"Backtest armed: {len(self.config.instrument_ids)} instruments")
+            return
+
         # Always register with the dashboard so the strategy is visible
         try:
             import redis
@@ -174,6 +190,40 @@ class EMACrossStopReverse(Strategy):
         self._pending_entries.discard(event.instrument_id)
         self._publish_order_event("canceled", event.instrument_id)
 
+    def _publish_indicator(self, bar: Bar, fast_v: float, slow_v: float) -> None:
+        # Push this strategy's (already warmed-up) EMAs into the dashboard indicator
+        # stream so the chart draws them directly — no cold-start recompute in the
+        # ControlActor. Same stream/keys the ControlActor uses for its other
+        # indicators; the dashboard merges fields per timestamp.
+        if self._redis is None:
+            return
+        try:
+            self._redis.xadd(
+                f"dashboard:indicators:{bar.bar_type.instrument_id}",
+                {
+                    "ts": str(bar.ts_event // 1_000_000_000),
+                    "tf": str(bar.bar_type.spec),
+                    "fast_ema": str(round(fast_v, 6)),
+                    "slow_ema": str(round(slow_v, 6)),
+                },
+                maxlen=50000, approximate=True,
+            )
+        except Exception:
+            pass
+
+    def on_historical_data(self, data) -> None:
+        # Warmup klines feed the registered EMAs (handle_bar historical=True) before
+        # this runs, so publish their values too — gives the chart an EMA line over
+        # the warmup history, not just from the first live bar.
+        bars = data if isinstance(data, list) else [data]
+        for bar in bars:
+            if not isinstance(bar, Bar):
+                continue
+            fast = self._fast.get(bar.bar_type.instrument_id)
+            slow = self._slow.get(bar.bar_type.instrument_id)
+            if fast and slow and fast.initialized and slow.initialized:
+                self._publish_indicator(bar, fast.value, slow.value)
+
     def on_bar(self, bar: Bar):
         if not self._active:
             return
@@ -198,6 +248,7 @@ class EMACrossStopReverse(Strategy):
             "description": self._description(),
             "emas": self._ema_snapshot,
         })
+        self._publish_indicator(bar, fast.value, slow.value)
 
         if fast.value > slow.value:
             signal = "bull"
