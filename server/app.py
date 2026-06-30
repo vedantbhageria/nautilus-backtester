@@ -624,9 +624,16 @@ async def _portfolio_loop(mode: str) -> None:
             await _safe_send_text(ws, text)
 
 
-# ── order events tails (one per mode) ────────────────────────────────────────
-async def _tail_order_events(mode: str) -> None:
-    rc = r_state[mode]
+# ── order events tail (single stream, routed per mode) ───────────────────────
+def _event_mode(strategy: str, mode_map: dict) -> str:
+    # All strategies (live and test) run in the live node and write order events
+    # to DB 0, tagged by strategy. Route each to its mode; untagged → live,
+    # matching the portfolio filter (_build_portfolio_sync).
+    return mode_map.get(strategy, "live")
+
+
+async def _tail_order_events() -> None:
+    rc = r_state["live"]   # all order events live in DB 0, tagged by strategy
     cursor = "$"
     while True:
         try:
@@ -637,7 +644,12 @@ async def _tail_order_events(mode: str) -> None:
             if not entries:
                 continue
             cursor = entries[-1][0]
+            try:
+                mode_map = await rc.hgetall("dashboard:strategy_modes")
+            except Exception:
+                mode_map = {}
             for _id, fields in entries:
+                ev_mode = _event_mode(fields.get("strategy", ""), mode_map)
                 frame = {
                     "type": "order_event",
                     "strategy": fields.get("strategy", ""),
@@ -648,7 +660,7 @@ async def _tail_order_events(mode: str) -> None:
                     "price": fields.get("price", ""),
                     "ts": float(fields.get("ts", 0)),
                 }
-                for ws in list(mode_clients.get(mode, ())):
+                for ws in list(mode_clients.get(ev_mode, ())):
                     await _safe_send(ws, frame)
         except RedisError:
             await asyncio.sleep(0.5)
@@ -663,8 +675,7 @@ async def _startup() -> None:
     asyncio.create_task(_packet_loop())
     asyncio.create_task(_portfolio_loop("live"))
     asyncio.create_task(_portfolio_loop("test"))
-    asyncio.create_task(_tail_order_events("live"))
-    asyncio.create_task(_tail_order_events("test"))
+    asyncio.create_task(_tail_order_events())
 
 
 # ── WebSocket ────────────────────────────────────────────────────────────────
@@ -686,10 +697,17 @@ async def ws_endpoint(websocket: WebSocket, mode: str = Query("live")):
     except Exception:
         pass
 
-    # Replay recent order events (order events live in DB 0 for both modes for now).
+    # Replay recent order events (all in DB 0, tagged by strategy). Only replay
+    # the ones belonging to this client's mode so live/test queues stay separate.
+    try:
+        mode_map = await r_state["live"].hgetall("dashboard:strategy_modes")
+    except Exception:
+        mode_map = {}
     try:
         past = await r_state["live"].xrevrange(ORDER_EVENTS_KEY, count=500)
         for _id, fields in reversed(past):
+            if _event_mode(fields.get("strategy", ""), mode_map) != mode:
+                continue
             await _safe_send(websocket, {
                 "type": "order_event",
                 "strategy": fields.get("strategy", ""),

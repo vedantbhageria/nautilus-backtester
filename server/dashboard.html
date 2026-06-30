@@ -501,6 +501,10 @@ function resetState(){
   accountPeak = ACCOUNT_START;
   if(_acctPollTimer){ clearInterval(_acctPollTimer); _acctPollTimer=null; }
   _vcData = []; _vcInited = false; _closedCacheKey = "";
+  // Clear order history/state so a reconnect's replay doesn't stack duplicate
+  // copies (the WS replays the last 500 order events on every connect).
+  for(const k in orderHistory) delete orderHistory[k];
+  for(const k in orderState) delete orderState[k];
   // Clear watchlist DOM — old rows reference deleted panels and would crash on click
   watchRows.clear();
   const wl = document.getElementById("watchList");
@@ -1383,8 +1387,11 @@ function renderAccount(){
   }
   const ts=s.map(p=>p.ts), nav=s.map(p=>p.nav);
   const ret=nav.map(v=>(v/ACCOUNT_START-1)*100);
-  let peak=Math.max(accountPeak, ACCOUNT_START);
-  let peakTs=null, peakNav=peak;
+  // Underwater drawdown: running high-water mark from the first point, so the
+  // curve sits at 0 whenever NAV makes a new high and only dips negative on the
+  // pullback from that running high (not measured against the global peak).
+  let peak=nav.length?nav[0]:ACCOUNT_START;
+  let peakTs=ts.length?ts[0]:null, peakNav=peak;
   const dd=nav.map((v,i)=>{
     if(v>peak){ peak=v; peakNav=v; peakTs=ts[i]; }
     return peak>0?(v-peak)/peak*100:0;
@@ -1406,7 +1413,7 @@ function renderAccount(){
   setRun("acRetNow", fmtSigned(curRet)+"%", "ac-run "+pnlClass(curRet));
   setRun("acDdNow", curDd.toFixed(2)+"%", "ac-run down");
   _acctLine("acNavChart", ts, nav, getCss("--blue"), {});
-  _acctLine("acRetChart", ts, ret, curRet>=0?getCss("--green"):getCss("--red"), {zero:0});
+  _acctLine("acRetChart", ts, ret, curRet>=0?getCss("--green"):getCss("--red"), {zero:0, peakFill:true});
   _acctLine("acDdChart", ts, dd, getCss("--red"), {fill:true, zero:0});
 }
 function _acctLine(canvasId, ts, vals, color, opts){
@@ -1430,6 +1437,19 @@ function _acctLine(canvasId, ts, vals, color, opts){
     ctx.lineTo(X(ts[ts.length-1]),Y(z)); ctx.closePath();
     ctx.fillStyle="rgba(239,83,80,0.18)"; ctx.fill();
   }
+  if(opts.peakFill){
+    // Shade the area between the line and its running high-water mark (the drawdown
+    // region): top edge = running peak envelope, bottom edge = the value line.
+    let pk=-Infinity; const peakLine=vals.map(v=>{ if(v>pk)pk=v; return pk; });
+    ctx.beginPath();
+    for(let i=0;i<peakLine.length;i++){ const x=X(ts[i]),y=Y(peakLine[i]); i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); }
+    for(let i=vals.length-1;i>=0;i--){ ctx.lineTo(X(ts[i]),Y(vals[i])); }
+    ctx.closePath(); ctx.fillStyle="rgba(239,83,80,0.18)"; ctx.fill();
+    // Faint dashed envelope marking the last peak the fill drops from.
+    ctx.strokeStyle="rgba(239,83,80,0.45)"; ctx.lineWidth=1; ctx.setLineDash([4,3]); ctx.beginPath();
+    for(let i=0;i<peakLine.length;i++){ const x=X(ts[i]),y=Y(peakLine[i]); i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); }
+    ctx.stroke(); ctx.setLineDash([]);
+  }
   ctx.strokeStyle=color; ctx.lineWidth=1.5; ctx.beginPath();
   for(let i=0;i<vals.length;i++){ const x=X(ts[i]), y=Y(vals[i]); if(i===0)ctx.moveTo(x,y); else ctx.lineTo(x,y); }
   ctx.stroke();
@@ -1443,7 +1463,8 @@ function openAcZoom(kind){
   const ts = s.map(p=>p.ts);
   let vals, color, opts, title, fmtVal;
   const ACCOUNT_START = 100000;
-  let peak = Math.max(accountPeak, ACCOUNT_START);
+  // Running high-water mark from the first point (for the underwater drawdown view).
+  let peak = s.length ? s[0].nav : ACCOUNT_START;
   if(kind==="nav"){
     vals = s.map(p=>p.nav);
     color = getCss("--blue");
@@ -1453,7 +1474,7 @@ function openAcZoom(kind){
   } else if(kind==="ret"){
     vals = s.map(p=>(p.nav/ACCOUNT_START-1)*100);
     color = vals[vals.length-1]>=0 ? getCss("--green") : getCss("--red");
-    opts = {zero:0};
+    opts = {zero:0, peakFill:true};
     title = "Return %";
     fmtVal = v => (v>=0?"+":"")+v.toFixed(3)+"%";
   } else {
@@ -1497,8 +1518,17 @@ function _drawAcZoom(){
   const vts = z.ts.slice(i0, i1+1), vvals = z.vals.slice(i0, i1+1);
   if(vts.length < 2) return;
 
+  // Running high-water mark over the FULL series (so the envelope is correct even
+  // when the visible peak occurred before the current window), sliced to the view.
+  let vpeak=null;
+  if(z.opts.peakFill){
+    let pk=-Infinity; const pkFull=z.vals.map(v=>{ if(v>pk)pk=v; return pk; });
+    vpeak=pkFull.slice(i0, i1+1);
+  }
+
   const tspan = Math.max(1, vt1-vt0);
   let lo=Math.min(...vvals), hi=Math.max(...vvals);
+  if(vpeak){ hi=Math.max(hi, ...vpeak); }
   if(z.opts.zero!=null){ lo=Math.min(lo,z.opts.zero); hi=Math.max(hi,z.opts.zero); }
   const pad=(hi-lo)*0.08||0.5; lo-=pad; hi+=pad;
   const X = t => (t-vt0)/tspan*w;
@@ -1516,6 +1546,16 @@ function _drawAcZoom(){
     for(let i=0;i<vts.length;i++) ctx.lineTo(X(vts[i]),Y(vvals[i]));
     ctx.lineTo(X(vts[vts.length-1]),Y(zero)); ctx.closePath();
     ctx.fillStyle="rgba(239,83,80,0.13)"; ctx.fill();
+  }
+  // Peak fill: shade between the line and its running high-water mark.
+  if(vpeak){
+    ctx.beginPath();
+    for(let i=0;i<vpeak.length;i++){ const x=X(vts[i]),y=Y(vpeak[i]); i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); }
+    for(let i=vvals.length-1;i>=0;i--){ ctx.lineTo(X(vts[i]),Y(vvals[i])); }
+    ctx.closePath(); ctx.fillStyle="rgba(239,83,80,0.13)"; ctx.fill();
+    ctx.strokeStyle="rgba(239,83,80,0.45)"; ctx.lineWidth=1; ctx.setLineDash([4,3]); ctx.beginPath();
+    for(let i=0;i<vpeak.length;i++){ const x=X(vts[i]),y=Y(vpeak[i]); i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); }
+    ctx.stroke(); ctx.setLineDash([]);
   }
   // Line
   ctx.strokeStyle=z.color; ctx.lineWidth=1.8; ctx.beginPath();

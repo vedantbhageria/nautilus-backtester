@@ -184,7 +184,7 @@ class ControlActor(Actor):
                     mode_map = self._redis.hgetall(STRATEGY_MODES_KEY) or {}
                 except Exception:
                     mode_map = {}
-                all_strats = {rec["strategy"] for rec in positions} | set(self._closed_positions.keys() and [c["strategy"] for c in self._closed_positions.values()])
+                all_strats = {rec["strategy"] for rec in positions} | {c["strategy"] for c in self._closed_positions.values()}
                 untagged = {sid for sid in all_strats if sid not in mode_map}
                 for mode_key, equity_key, peak_key, peak_attr in (
                     ("live", EQUITY_LIVE_KEY, EQUITY_LIVE_PEAK_KEY, "_equity_peak_live"),
@@ -328,13 +328,14 @@ class ControlActor(Actor):
         try:
             if action == "subscribe":
                 iid = InstrumentId.from_str(command["instrument_id"])
-                self.subscribe_quote_ticks(iid)
+                # No quote subscription: the dashboard's live price comes from trade
+                # ticks (:data.trades.*), and quotes would otherwise reach the sandbox
+                # matcher and degrade the strategy's L2 order book at the top level.
                 self.subscribe_trade_ticks(iid)
                 if command.get("bar_type"):
                     self.subscribe_bars(BarType.from_str(command["bar_type"]), update_catalog=False)
             elif action == "unsubscribe":
                 iid = InstrumentId.from_str(command["instrument_id"])
-                self.unsubscribe_quote_ticks(iid)
                 self.unsubscribe_trade_ticks(iid)
                 if command.get("bar_type"):
                     self.unsubscribe_bars(BarType.from_str(command["bar_type"]))

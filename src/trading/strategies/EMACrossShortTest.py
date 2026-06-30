@@ -6,7 +6,7 @@ from decimal import Decimal
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.indicators import ExponentialMovingAverage
 from nautilus_trader.model.data import Bar, BarType
-from nautilus_trader.model.enums import OrderSide
+from nautilus_trader.model.enums import OrderSide, BookType
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.trading.strategy import Strategy
 
@@ -106,13 +106,18 @@ class EMACrossStopReverse(Strategy):
                 self.register_indicator_for_bars(bt, self._fast[iid])
                 self.register_indicator_for_bars(bt, self._slow[iid])
                 self.subscribe_bars(bt)
-                # The sandbox execution client fills orders by processing live
-                # quote/trade ticks for the venue. EXTERNAL (kline) bars don't
-                # produce ticks, so without this the sandbox has no market to fill
-                # against and rejects orders. Quote ticks keep its L1 book populated.
-                self.subscribe_quote_ticks(iid)
+                # Feed the sandbox matching engine an L2 (market-by-price) book so
+                # market orders walk real depth and fill the full size with realistic
+                # slippage — instead of an L1 top-of-book that capped fills. Binance
+                # partial-book depth @20 levels @100ms is light and more than enough
+                # depth for our order sizes. EXTERNAL klines produce no market to fill
+                # against, so this book is what the matcher executes on.
+                self.subscribe_order_book_deltas(
+                    iid, book_type=BookType.L2_MBP, depth=20,
+                    params={"update_speed": 100},
+                )
             self._warmup_emas()
-            self.log.info(f"Armed: subscribed to {len(self.config.instrument_ids)} x {self.config.bar_spec} bars + quotes")
+            self.log.info(f"Armed: subscribed to {len(self.config.instrument_ids)} x {self.config.bar_spec} bars + L2 book")
         else:
             self.log.info("Disarmed on start — idle until armed by controller")
 
@@ -279,9 +284,16 @@ class EMACrossStopReverse(Strategy):
     def _can_enter(self, iid: InstrumentId) -> bool:
         if iid in self._pending_entries:
             return False
-        open_iids = {p.instrument_id for p in self.cache.positions_open()}
-        # Union gives all "committed" instrument slots (open or pending).
-        # iid already in open_iids means close+reopen — net count unchanged, always allow.
+        # Count only THIS strategy's open positions — the cache is shared across all
+        # strategies, so an unfiltered positions_open() would let another strategy's
+        # positions eat into this strategy's slot budget.
+        open_iids = {p.instrument_id for p in self.cache.positions_open(strategy_id=self.id)}
+        # A reversal reuses the instrument's existing slot (net count unchanged), so
+        # always allow re-entry for an already-open instrument; otherwise a reversal
+        # at the cap would close without reopening. Only genuinely new instruments are
+        # gated by the cap (open + pending slots).
+        if iid in open_iids:
+            return True
         return len(open_iids | self._pending_entries) < 50
 
     def _trade(self, iid: InstrumentId, side: OrderSide, price: float) -> None:

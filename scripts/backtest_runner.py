@@ -179,14 +179,17 @@ def run_backtest(r, live_strategy, instruments,
                   n=len(instruments), done=len(instruments), started=started, phase="engine")
         engine.run()
 
-        # Last close per instrument, for unrealized PnL on positions still open.
+        # Last close per instrument (for force-close pricing) and the full 1m close
+        # series (seconds -> close) used by the mark-to-market equity curve below.
         last_px = {}
+        price_series = {}
         for inst in instruments:
             raw = r.get(f"{BT}:bars:{inst.id}")
             if raw:
                 arr = json.loads(raw)
                 if arr:
                     last_px[str(inst.id)] = arr[-1]["c"]
+                    price_series[str(inst.id)] = [(b["t"], b["c"]) for b in arr]
 
         open_pos, closed_pos = [], []
         pnl = {}
@@ -227,22 +230,78 @@ def run_backtest(r, live_strategy, instruments,
         r.set(f"{BT}:positions", json.dumps({
             "positions": open_pos, "closed_positions": closed_pos, "pnl": pnl}))
 
-        # Build an equity curve (cumulative realized PnL over the backtest period)
-        # so the Account tab can show a continuous history for test mode.
-        equity_pts = [{"ts": start_ms, "nav": 100_000.0, "realized": 0.0, "unrealized": 0.0, "total": 0.0}]
-        running = 0.0
-        for cp in sorted(closed_pos, key=lambda c: c["ts_closed"]):
-            running += cp.get("realized", 0.0)
-            equity_pts.append({
-                "ts": cp["ts_closed"],
-                "nav": round(100_000.0 + running, 4),
-                "realized": round(running, 4),
-                "unrealized": 0.0,
-                "total": round(running, 4),
+        # Build a MARK-TO-MARKET equity curve (realized + unrealized per bar) so the
+        # Account tab's NAV / return / drawdown reflect TOTAL PnL throughout the run —
+        # exactly like the live curve, which is `realized + unrealized` every 5s. A
+        # realized-only curve hides open positions' drawdown until they close, which
+        # made every still-open position's loss land on one timestamp (end_ms) when
+        # force-closed, producing an artificial cliff at the right edge.
+        #
+        # All positions are now in closed_pos (open ones were force-closed above), each
+        # with a +qty (LONG) / -qty (SHORT) signed size and ms open/close timestamps.
+        sweep_pos = []
+        for cp in closed_pos:
+            signed = cp["qty"] if cp["side"] == "LONG" else -cp["qty"]
+            sweep_pos.append({
+                "inst": cp["instrument"], "signed": signed,
+                "open_px": cp["avg_px_open"], "realized": cp.get("realized", 0.0),
+                "t_open": cp["ts_opened"] // 1000,    # ms -> s (bar grid is seconds)
+                "t_close": cp["ts_closed"] // 1000,
             })
+        sweep_pos.sort(key=lambda p: p["t_open"])
+
+        # Sweep every 1m close timestamp in order; forward-fill each instrument's price,
+        # open/close positions as their entries/exits pass, and mark the open book to
+        # the current price. O(bars + ts·open_positions) — open book is capped at 50.
+        all_ts = sorted({t for series in price_series.values() for (t, _) in series})
+        ptr = {iid: 0 for iid in price_series}
+        last_close = {iid: None for iid in price_series}
+        equity_pts = [{"ts": start_ms, "nav": 100_000.0, "realized": 0.0, "unrealized": 0.0, "total": 0.0}]
+        realized_running = 0.0
+        open_now, oi = [], 0
+        for t in all_ts:
+            for iid, series in price_series.items():
+                p = ptr[iid]
+                while p < len(series) and series[p][0] <= t:
+                    last_close[iid] = series[p][1]
+                    p += 1
+                ptr[iid] = p
+            while oi < len(sweep_pos) and sweep_pos[oi]["t_open"] <= t:
+                open_now.append(sweep_pos[oi]); oi += 1
+            still_open = []
+            for pos in open_now:
+                if pos["t_close"] <= t:
+                    realized_running += pos["realized"]
+                else:
+                    still_open.append(pos)
+            open_now = still_open
+            unreal = 0.0
+            for pos in open_now:
+                px = last_close.get(pos["inst"])
+                if px is not None:
+                    unreal += pos["signed"] * (px - pos["open_px"])
+            total = realized_running + unreal
+            equity_pts.append({
+                "ts": t * 1000,
+                "nav": round(100_000.0 + total, 4),
+                "realized": round(realized_running, 4),
+                "unrealized": round(unreal, 4),
+                "total": round(total, 4),
+            })
+        # Final point at end_ms with everything realized. Force-close realized equals
+        # the last-bar unrealized, so this is continuous with the sweep (no new cliff)
+        # and gives the live-handoff offset a clean realized-only ending NAV.
+        final_realized = sum(p["realized"] for p in sweep_pos)
+        equity_pts.append({
+            "ts": end_ms,
+            "nav": round(100_000.0 + final_realized, 4),
+            "realized": round(final_realized, 4),
+            "unrealized": 0.0,
+            "total": round(final_realized, 4),
+        })
         r.set(f"{BT}:equity", json.dumps(equity_pts))
         # Store the ending NAV as the test equity starting point for the live handoff
-        r.set(f"{BT}:equity:end_nav", str(round(100_000.0 + running, 4)))
+        r.set(f"{BT}:equity:end_nav", str(round(100_000.0 + final_realized, 4)))
         _set_meta(r, status="done", strategy=sid, days=actual_days, n=len(instruments),
                   done=len(instruments), started=started, finished=time.time(),
                   open=0, closed=len(closed_pos), pnl=pnl,

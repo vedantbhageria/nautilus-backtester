@@ -1,4 +1,5 @@
 import os
+from decimal import Decimal
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
@@ -102,11 +103,21 @@ config_node = TradingNodeConfig(
         BINANCE_FUTURES: SandboxExecutionClientConfig(
             venue=BINANCE_FUTURES,
             starting_balances=["100000 USDT"],
-            # Match orders against the quote book only. Quotes (bookTicker) and
-            # trades (aggTrade) arrive from separate Binance streams with slightly
-            # different timestamps; feeding both makes the matching engine log
-            # "Skipping stale trade" for out-of-order trades. The strategy feeds
-            # quotes for fills, so trades aren't needed for execution.
+            # HEDGING to match the backtest venue (each entry is a separate position,
+            # not netted into one per instrument).
+            oms_type="HEDGING",
+            # L2 (market-by-price) book so market orders walk real depth and fill the
+            # FULL size with realistic slippage, instead of being capped at the L1
+            # top-of-book size (which left $2000 orders only partially filled on thin
+            # names). The strategy feeds the book via order book deltas (Binance
+            # partial depth @20 levels). Trades aren't needed for execution and arrive
+            # with offset timestamps that trigger "Skipping stale trade", so keep them
+            # off. (L3/per-order depth isn't published by Binance.)
+            book_type="L2_MBP",
+            # 10x leverage to match the backtest venue (and give the 50-position cap
+            # headroom: 50 x $2000 = $100k notional -> only $10k margin at 10x, vs the
+            # full $100k balance at 1x which would start rejecting orders at the cap).
+            default_leverage=Decimal(10),
             trade_execution=False,
         ),
     },
