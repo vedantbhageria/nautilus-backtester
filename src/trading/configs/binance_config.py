@@ -14,6 +14,7 @@ from nautilus_trader.config import MessageBusConfig
 from nautilus_trader.config import DatabaseConfig
 from nautilus_trader.model.identifiers import Venue
 from nautilus_trader.model.instruments import CryptoPerpetual, CryptoFuture, CurrencyPair
+from nautilus_trader.model.data import OrderBookDelta, OrderBookDeltas
 from nautilus_trader.adapters.binance import BinanceDataClientConfig
 from nautilus_trader.adapters.binance import BinanceExecClientConfig
 from nautilus_trader.adapters.binance import BinanceAccountType
@@ -76,7 +77,13 @@ config_node = TradingNodeConfig(
         autotrim_mins=STREAM_RETENTION_MINS,
         heartbeat_interval_secs=1,
         buffer_interval_ms=50,
-        types_filter=[CryptoPerpetual, CryptoFuture, CurrencyPair],
+        # Keep order book deltas OFF the Redis backbone: the L2 subscription streams
+        # ~20k book updates/sec across all instruments, and with stream_per_topic +
+        # 3-day retention that floods/OOMs Redis (crashes the node's data feed). The
+        # in-process matcher still receives them (types_filter only affects external
+        # streaming), so L2 fills keep working — the dashboard never reads books anyway.
+        types_filter=[CryptoPerpetual, CryptoFuture, CurrencyPair,
+                      OrderBookDelta, OrderBookDeltas],
     ),
     data_clients={
         BINANCE_SPOT: BinanceDataClientConfig(

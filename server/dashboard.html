@@ -68,6 +68,8 @@
   #chart{ flex:1 1 0; min-height:0; }
   #oscPanel{ flex:0 0 auto; height:90px; border-top:1px solid var(--line-soft); display:none; overflow:hidden; }
   #oscPanel canvas{ height:100%; }
+  #ddPanel{ flex:0 0 auto; height:78px; border-top:1px solid var(--line-soft); overflow:hidden; }
+  #ddPanel canvas{ height:100%; }
   .chart-empty{ position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--dim-2); font-size:12px; }
   /* Backfill loading indicator (indeterminate sweep, top of chart) */
   .loading-bar{ position:absolute; top:0; left:0; right:0; height:2px; overflow:hidden; display:none; pointer-events:none; }
@@ -219,6 +221,7 @@
       <button class="tab" data-view="account" onclick="switchView('account')">Account</button>
     </div>
     <div class="addbar">
+      <span id="hdrClock" style="align-self:center;margin-right:10px;font:600 12px ui-monospace,monospace;color:var(--dim-2);letter-spacing:.5px;white-space:nowrap;">--:--:--</span>
       <input id="addInput" list="symList" placeholder="add instrument, enter…" autocomplete="off" />
       <datalist id="symList"></datalist>
       <button class="btn" id="addBtn">add</button>
@@ -238,7 +241,9 @@
         <span class="sym" id="mSym">—</span>
         <span class="px" id="mPx">–</span>
         <span class="chg" id="mChg"></span>
-        <div class="ranges" id="ranges">
+        <!-- Discrete range buttons replaced by Binance-style wheel-zoom + drag-pan.
+             Kept hidden so syncRanges() and any data-window fallback still resolve. -->
+        <div class="ranges" id="ranges" style="display:none;">
           <button data-w="2m">2m</button>
           <button data-w="10m" class="active">10m</button>
           <button data-w="30m">30m</button>
@@ -264,10 +269,13 @@
         <label class="ind-cb"><input type="checkbox" id="cbIchi"> Ichimoku</label>
         <span class="ind-sep"></span>
         <label class="ind-cb"><input type="checkbox" id="cbRsi"> RSI(14)</label>
+        <span class="ind-sep"></span>
+        <label class="ind-cb"><input type="checkbox" id="cbFlags" checked> Flags</label>
       </div>
       <div class="chartwrap">
         <canvas id="chart"></canvas>
         <div id="oscPanel"><canvas id="oscChart"></canvas></div>
+        <div id="ddPanel"><canvas id="ddChart"></canvas></div>
         <div class="loading-bar" id="loadingBar"></div><div class="loading-pill" id="loadingPill"><span class="dot"></span>backfilling…</div><div class="chart-empty" id="chartEmpty">select an instrument</div><button id="liveBtn" style="display:none;position:absolute;top:8px;right:8px;align-items:center;gap:5px;background:var(--panel-2);border:1px solid var(--amber);color:var(--amber);font-family:var(--mono);font-size:11px;font-weight:700;padding:5px 10px;border-radius:6px;cursor:pointer;">&#9679; live</button>
       </div>
     </div>
@@ -718,15 +726,44 @@ function pushTape(points){
 
 // ---------- Chart (dependency-free canvas line) ----------
 const AXIS_H = 22;   // pixels reserved at the bottom for the time axis
+const AXIS_W = 60;   // pixels reserved on the right for the price axis (Binance style)
+const BIN_GREEN = "#27BE83", BIN_RED = "#DE5163";   // Binance palette, slightly desaturated
 let rafPending=false;
+// Continuous visible span in seconds (Binance-style zoom). Falls back to the legacy
+// window size until the user zooms with the wheel.
+function _vsec(p){ return p && p.viewSec ? p.viewSec : (WINDOW_SEC[p && p.window]||600); }
+// Clamp the pan offset so you can't scroll past the oldest loaded data (ticks in
+// tick mode, bars otherwise) or into the future.
+function _clampOffset(p){
+  const wsec=_vsec(p); let span=0;
+  if(p.timeframe==="tick"){ if(p.ticks.length>1) span=p.ticks[p.ticks.length-1].t-p.ticks[0].t; }
+  else { const tfsec=TF_SEC[p.timeframe]||60; const bars=p.barsByTf[p.timeframe]||[]; if(bars.length>1) span=bars[bars.length-1].t-bars[0].t+tfsec; }
+  p.offset=Math.max(0, Math.min(p.offset||0, Math.max(0, span-wsec)));
+}
 function render(){ if(rafPending) return; rafPending=true; requestAnimationFrame(draw); }
 function showEmpty(on){ document.getElementById("chartEmpty").style.display = on?"flex":"none"; }
 
 let mouse = null; // {x, y} in CSS pixels, or null when outside canvas
 
-function gridY(ctx,w,ch,lo,hi){
+function gridY(ctx,pw,ch,lo,hi){
   ctx.strokeStyle=getCss("--line-soft"); ctx.lineWidth=1; ctx.font="10px "+getCss("--mono"); ctx.fillStyle=getCss("--dim-2");
-  for(let i=0;i<=4;i++){ const y=ch*i/4; ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(w,y); ctx.stroke(); const v=hi-(hi-lo)*i/4; ctx.fillText(fmt(v), 4, y+11); }
+  for(let i=0;i<=4;i++){ const y=ch*i/4; ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(pw,y); ctx.stroke(); const v=hi-(hi-lo)*i/4; ctx.fillText(fmt(v), pw+6, y+11); }
+  // Vertical separator between the plot and the right-hand price axis.
+  ctx.strokeStyle=getCss("--line-soft"); ctx.beginPath(); ctx.moveTo(pw,0); ctx.lineTo(pw,ch); ctx.stroke();
+}
+// Binance-style last-price marker: dashed line across the plot + a coloured tag
+// pinned to the right price axis.
+function drawLastPrice(ctx,pw,ch,price,Y,up){
+  if(price==null||isNaN(price)) return;
+  const yc=Math.max(0,Math.min(ch, Y(price)));
+  const col=up?BIN_GREEN:BIN_RED;
+  ctx.save();
+  ctx.strokeStyle=col; ctx.globalAlpha=0.85; ctx.lineWidth=1; ctx.setLineDash([2,3]);
+  ctx.beginPath(); ctx.moveTo(0,yc); ctx.lineTo(pw,yc); ctx.stroke(); ctx.setLineDash([]);
+  const label=fmt(price); ctx.font="10px "+getCss("--mono"); const tw=ctx.measureText(label).width;
+  ctx.globalAlpha=1; ctx.fillStyle=col; ctx.fillRect(pw, yc-8, Math.min(AXIS_W-1, tw+10), 16);
+  ctx.fillStyle="#06140d"; ctx.textBaseline="middle"; ctx.fillText(label, pw+5, yc+1);
+  ctx.restore();
 }
 
 // Picks a nice tick interval (in seconds) that gives ~5-8 labels across wsec.
@@ -797,12 +834,15 @@ function draw(){
   const cv=document.getElementById("chart"); const p=panels[active];
   const dpr=window.devicePixelRatio||1, w=cv.clientWidth, h=cv.clientHeight;
   cv.width=w*dpr; cv.height=h*dpr; const ctx=cv.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h);
-  if(!p){ showEmpty(true); return; }
+  if(!p){ showEmpty(true); const dc=document.getElementById("ddChart"); if(dc){ dc.width=dc.clientWidth; dc.getContext("2d").clearRect(0,0,dc.width,dc.height); } return; }
   const actInds=getActiveInds();
   const isTick=(p.timeframe||"tick")==="tick";
   document.getElementById("oscPanel").style.display = (actInds.rsi||actInds.rvi) ? "block" : "none";
   if(isTick) drawLine(ctx,p,w,h,actInds);
   else drawCandles(ctx,p,w,h,actInds);
+  // Drawdown subplot — uses the main chart's stashed view (t0/wsec) so it pans/zooms
+  // in lockstep with the candles.
+  if(p._view) drawDrawdown(p, p._view.t0, p._view.wsec);
 }
 
 // ---------- trade markers ----------
@@ -831,11 +871,16 @@ function _triMarker(ctx,x,y,size,up,color){
   ctx.restore();
 }
 function _markerStyle(type){
-  if(type==="long")  return {color:getCss("--green"), up:true,  label:"long"};
-  if(type==="short") return {color:getCss("--red"),   up:false, label:"short"};
+  // Vivid, fixed colours so the long/short flags stand out against the (slightly
+  // desaturated) candles instead of blending into a same-coloured bar.
+  if(type==="long")  return {color:"#16D89A", up:true, label:"long"};
+  // Short flag is also a right-side-up triangle (base at the bottom) so it's distinct
+  // from the downward grey exit marker and isn't hidden when an exit lands near it.
+  if(type==="short") return {color:"#FF4D67", up:true, label:"short"};
   return {color:getCss("--dim-2"), up:false, label:"exit"};
 }
 function drawTradeMarkers(ctx,instrument,X,Y,t0,w,ch,snapBars,tfsec){
+  const cbF=document.getElementById("cbFlags"); if(cbF && !cbF.checked) return;  // Flags toggle
   for(const m of _tradeMarkers(instrument)){
     if(m.t<t0||m.price==null) continue;
     let t=m.t;
@@ -872,17 +917,19 @@ function drawTradeMarkers(ctx,instrument,X,Y,t0,w,ch,snapBars,tfsec){
 }
 function drawLine(ctx,p,w,h,actInds){
   if(p.ticks.length<2){ showEmpty(true); return; } showEmpty(false);
-  const ch=h-AXIS_H;
-  const wsec=WINDOW_SEC[p.window]||600, latest=p.ticks[p.ticks.length-1].t, t0=latest-wsec-(p.offset||0);
+  const ch=h-AXIS_H, pw=w-AXIS_W;
+  const wsec=_vsec(p), latest=p.ticks[p.ticks.length-1].t, Rbase=latest, t0=Rbase-wsec-(p.offset||0);
+  p._view={t0,wsec,pw,Rbase};   // stashed for the wheel/drag handlers
   let lo=Infinity, hi=-Infinity;
   for(const d of p.ticks){ if(d.t<t0) continue; if(d.v<lo)lo=d.v; if(d.v>hi)hi=d.v; }
   if(lo===Infinity){ return; }
   const pad=(hi-lo)*0.08||1; lo-=pad; hi+=pad;
-  const X=t=>(t-t0)/wsec*w, Y=v=>ch-(v-lo)/(hi-lo)*ch;
-  gridY(ctx,w,ch,lo,hi);
-  drawXAxis(ctx,w,ch,t0,wsec);
-  const up = p.ticks[p.ticks.length-1].v >= p.ticks[0].v;
-  ctx.strokeStyle=up?getCss("--green"):getCss("--red"); ctx.lineWidth=1.5; ctx.beginPath();
+  const X=t=>(t-t0)/wsec*pw, Y=v=>ch-(v-lo)/(hi-lo)*ch;
+  gridY(ctx,pw,ch,lo,hi);
+  drawXAxis(ctx,pw,ch,t0,wsec);
+  const lastV=p.ticks[p.ticks.length-1].v;
+  const up = lastV >= p.ticks[0].v;
+  ctx.strokeStyle=up?BIN_GREEN:BIN_RED; ctx.lineWidth=1.5; ctx.beginPath();
   let started=false;
   for(const d of p.ticks){ if(d.t<t0) continue; const x=X(d.t), y=Y(d.v); if(!started){ctx.moveTo(x,y);started=true;} else ctx.lineTo(x,y); }
   ctx.stroke();
@@ -891,14 +938,15 @@ function drawLine(ctx,p,w,h,actInds){
     const indData=(p.indicators&&p.indicators["1-SECOND-LAST"])||{};
     const synthBars=Object.keys(indData).map(Number).filter(ts=>ts>=t0).sort().map(ts=>({t:ts}));
     if(synthBars.length){
-      drawIndicatorOverlay(ctx,indData,w,ch,t0,wsec,synthBars,lo,hi,actInds);
+      drawIndicatorOverlay(ctx,indData,pw,ch,t0,wsec,synthBars,lo,hi,actInds);
       if(actInds.rsi||actInds.rvi) drawOscillator(indData,actInds,t0,wsec,synthBars);
     }
   }
-  drawTradeMarkers(ctx,active,X,Y,t0,w,ch);
+  drawLastPrice(ctx,pw,ch,lastV,Y,up);
+  drawTradeMarkers(ctx,active,X,Y,t0,pw,ch);
   if(mouse){
-    const mx=mouse.x, my=mouse.y;
-    const hoverT=t0+mx/w*wsec;
+    const mx=Math.min(mouse.x,pw), my=mouse.y;
+    const hoverT=t0+mx/pw*wsec;
     let best=null, bd=Infinity;
     for(const d of p.ticks){ if(d.t<t0) continue; const dx=Math.abs(d.t-hoverT); if(dx<bd){bd=dx;best=d;} }
     let label=best?`${fmtAxisTime(best.t,1)}\nprice  ${fmt(best.v)}\nqty    ${fmtQty(best.q)}`:null;
@@ -915,14 +963,14 @@ function drawLine(ctx,p,w,h,actInds){
       if(actInds.ichi&&snap.ichi_tenkan!=null) lines.push(`T/K  ${fmt(snap.ichi_tenkan)} / ${fmt(snap.ichi_kijun)}`);
       if(lines.length) label+="\n"+lines.join("\n");
     }
-    drawCrosshair(ctx,w,ch,mx,my,label);
+    drawCrosshair(ctx,pw,ch,mx,my,label);
   }
 }
 function drawCandles(ctx,p,w,h,actInds){
   const rawAll = p.barsByTf[p.timeframe]||[];
   if(rawAll.length<1){ showEmpty(true); return; } showEmpty(false);
-  const ch=h-AXIS_H;
-  const wsec=WINDOW_SEC[p.window]||600;
+  const ch=h-AXIS_H, pw=w-AXIS_W;
+  const wsec=_vsec(p);
   const tfsec=TF_SEC[p.timeframe]||60;
   // EXTERNAL Binance klines are timestamped at the bar CLOSE, INTERNAL bars at the
   // OPEN. Positioning is by open time (b.t + tfsec/2 = centre), so normalize
@@ -959,18 +1007,20 @@ function drawCandles(ctx,p,w,h,actInds){
   // the chart.)
   const rightPad=tfsec*0.5;
   const latest=allBars[allBars.length-1].t;
-  const t0=latest+tfsec/2+rightPad-wsec-(p.offset||0);
+  const Rbase=latest+tfsec/2+rightPad;
+  const t0=Rbase-wsec-(p.offset||0);
+  p._view={t0,wsec,pw,Rbase};   // stashed for the wheel/drag handlers
   const inWin=allBars.filter(b=>b.t>=t0);
   if(!inWin.length){ showEmpty(true); return; }
   let lo=Infinity, hi=-Infinity;
   for(const b of inWin){ if(b.l<lo)lo=b.l; if(b.h>hi)hi=b.h; }
   const pad=(hi-lo)*0.08||1; lo-=pad; hi+=pad;
-  const X=t=>(t-t0)/wsec*w, Y=v=>ch-(v-lo)/(hi-lo)*ch;
-  gridY(ctx,w,ch,lo,hi);
-  drawXAxis(ctx,w,ch,t0,wsec);
+  const X=t=>(t-t0)/wsec*pw, Y=v=>ch-(v-lo)/(hi-lo)*ch;
+  gridY(ctx,pw,ch,lo,hi);
+  drawXAxis(ctx,pw,ch,t0,wsec);
   const candlesInView = wsec/tfsec;
-  const cw = Math.max(2, w/candlesInView*0.85);
-  const g=getCss("--green"), r=getCss("--red");
+  const cw = Math.max(2, pw/candlesInView*0.85);
+  const g=BIN_GREEN, r=BIN_RED;
   for(const b of inWin){
     const x=X(b.t + tfsec/2), col=b.c>=b.o?g:r;
     const alpha=b.live?0.45:1;
@@ -982,12 +1032,14 @@ function drawCandles(ctx,p,w,h,actInds){
     ctx.globalAlpha=1;
   }
   // Indicator overlays (drawn after candles, before crosshair)
-  if(actInds){ const id=getIndData(p); drawIndicatorOverlay(ctx,id,w,ch,t0,wsec,inWin,lo,hi,actInds,tfsec/2);
+  if(actInds){ const id=getIndData(p); drawIndicatorOverlay(ctx,id,pw,ch,t0,wsec,inWin,lo,hi,actInds,tfsec/2);
     if(actInds.rsi||actInds.rvi) drawOscillator(id,actInds,t0,wsec,inWin,tfsec/2); }
-  drawTradeMarkers(ctx,active,X,Y,t0,w,ch,inWin,tfsec);
+  const lastBar=allBars[allBars.length-1];
+  drawLastPrice(ctx,pw,ch,lastBar.c,Y,lastBar.c>=lastBar.o);
+  drawTradeMarkers(ctx,active,X,Y,t0,pw,ch,inWin,tfsec);
   if(mouse){
-    const mx=mouse.x, my=mouse.y;
-    const hoverT=t0+mx/w*wsec;
+    const mx=Math.min(mouse.x,pw), my=mouse.y;
+    const hoverT=t0+mx/pw*wsec;
     const hovered=inWin.reduce((best,b)=>Math.abs(b.t+tfsec/2-hoverT)<Math.abs(best.t+tfsec/2-hoverT)?b:best, inWin[0]);
     const chg=hovered?(hovered.c-hovered.o)/hovered.o*100:0;
     // Show the bar's CLOSE time (open + interval). The live forming bar hasn't
@@ -1007,38 +1059,48 @@ function drawCandles(ctx,p,w,h,actInds){
       if(actInds.ichi&&snap.ichi_tenkan!=null) lines.push(`T/K  ${fmt(snap.ichi_tenkan)} / ${fmt(snap.ichi_kijun)}`);
       if(lines.length) label+="\n"+lines.join("\n");
     }
-    drawCrosshair(ctx,w,ch,mx,my,label);
+    drawCrosshair(ctx,pw,ch,mx,my,label);
   }
 }
 window.addEventListener("resize", render);
 window.addEventListener("resize", ()=>{ if(document.getElementById("accountView").style.display!=="none") renderAccount(); });
 const _cv=document.getElementById("chart");
-_cv.addEventListener("mousemove",e=>{ const r=_cv.getBoundingClientRect(); mouse={x:e.clientX-r.left,y:e.clientY-r.top}; render(); });
+_cv.style.cursor="grab";
+let _drag=null;   // {x} client-x at the start of the current pan-drag, or null
+_cv.addEventListener("mousedown",e=>{ if(!active) return; _drag={x:e.clientX}; _cv.style.cursor="grabbing"; });
+window.addEventListener("mouseup",()=>{ if(_drag){ _drag=null; _cv.style.cursor="grab"; } });
+_cv.addEventListener("mousemove",e=>{
+  const r=_cv.getBoundingClientRect(); mouse={x:e.clientX-r.left,y:e.clientY-r.top};
+  if(_drag && active){
+    const p=panels[active], v=p._view;
+    if(v && v.pw){
+      const dx=e.clientX-_drag.x; _drag.x=e.clientX;
+      // Drag right → reveal older data → larger offset (pan back in time).
+      p.offset=(p.offset||0)+dx/v.pw*v.wsec;
+      _clampOffset(p);
+      document.getElementById("liveBtn").style.display = p.offset>0?"flex":"none";
+    }
+  }
+  render();
+});
 _cv.addEventListener("mouseleave",()=>{ mouse=null; render(); });
-document.getElementById("chart").addEventListener("wheel", e=>{
+// Wheel = zoom (Binance style), anchored at the cursor so the time under it stays put.
+_cv.addEventListener("wheel", e=>{
   e.preventDefault();
   if(!active) return;
-  const p=panels[active];
-  const wsec=WINDOW_SEC[p.window]||600;
-  // Step: 20% of the visible window per wheel notch, minimum 5 s so tick mode isn't sluggish
-  const step=Math.max(5, wsec*0.20);
-  p.offset=Math.max(0, p.offset + step*Math.sign(e.deltaY));
-  // Clamp so we can't scroll past the oldest data. Use bars in candle/backtest mode
-  // (ticks are a short rolling window and would clamp too early), ticks in tick mode.
-  const isTick = p.timeframe==="tick";
-  if(isTick){
-    if(p.ticks.length>1){
-      const span=p.ticks[p.ticks.length-1].t-p.ticks[0].t;
-      p.offset=Math.min(p.offset, Math.max(0, span-wsec));
-    } else { p.offset=0; }
-  } else {
-    const tfsec=TF_SEC[p.timeframe]||60;
-    const bars=p.barsByTf[p.timeframe]||[];
-    if(bars.length>1){
-      const span=bars[bars.length-1].t-bars[0].t+tfsec;
-      p.offset=Math.min(p.offset, Math.max(0, span-wsec));
-    } else { p.offset=0; }
-  }
+  const p=panels[active], v=p._view; if(!v||!v.pw){ render(); return; }
+  const wsec=v.wsec, pw=v.pw;
+  const mx=Math.max(0, Math.min(mouse?mouse.x:pw, pw));
+  const tc=v.t0 + mx/pw*wsec;                         // time under the cursor
+  const tfsec=p.timeframe==="tick" ? 1 : (TF_SEC[p.timeframe]||60);
+  const minSpan=Math.max(tfsec*6, 20), maxSpan=14*86400;   // ~6 candles to 14 days
+  const factor=e.deltaY>0 ? 1.2 : 1/1.2;             // wheel down = zoom out
+  const newWsec=Math.max(minSpan, Math.min(maxSpan, wsec*factor));
+  p.viewSec=newWsec;
+  // Keep tc under the cursor: newT0 = tc - mx/pw*newWsec; offset measured from Rbase.
+  const newT0=tc - mx/pw*newWsec;
+  p.offset=v.Rbase-(newT0+newWsec);
+  _clampOffset(p);
   document.getElementById("liveBtn").style.display = p.offset>0?"flex":"none";
   render();
 },{passive:false});
@@ -2053,6 +2115,54 @@ function drawOscillator(indData, actInds, t0, wsec, inWin, tshift=0) {
   ctx.fillText(lbls.join("  "),4,2); ctx.restore();
 }
 
+// Drawdown subplot: how far the instrument price is below its running peak (%),
+// drawn underwater and aligned to the main chart (same t0/wsec and plot width, so it
+// pans/zooms in sync). The running peak is taken over the whole loaded series, then
+// only the visible portion is rendered.
+function drawDrawdown(p, t0, wsec){
+  const cv=document.getElementById("ddChart"); if(!cv) return;
+  const dpr=window.devicePixelRatio||1, w=cv.clientWidth, h=cv.clientHeight, pw=w-AXIS_W;
+  cv.width=w*dpr; cv.height=h*dpr;
+  const ctx=cv.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h);
+  // (time, price) series + the centring shift used by the candles.
+  let series, tshift=0;
+  if(p.timeframe==="tick"){
+    series=(p.ticks||[]).map(d=>[d.t,d.v]);
+  } else {
+    const tfsec=TF_SEC[p.timeframe]||60; tshift=tfsec/2;
+    const closeTimed=(typeof TF_SOURCE!=="undefined") && TF_SOURCE[p.timeframe]==="EXTERNAL";
+    series=(p.barsByTf[p.timeframe]||[]).map(b=>[closeTimed?Math.floor(b.t/tfsec)*tfsec:b.t, b.c]);
+  }
+  if(series.length<2) return;
+  // Running high-water mark over the full series → drawdown %.
+  let peak=-Infinity;
+  const dd=series.map(([t,v])=>{ if(v>peak)peak=v; return [t, peak>0?(v-peak)/peak*100:0]; });
+  const vis=dd.filter(([t])=>t>=t0);
+  if(!vis.length) return;
+  let lo=0; for(const [,d] of vis) if(d<lo) lo=d;   // dd ≤ 0
+  const pad=(0-lo)*0.12||1; const LO=lo-pad, HI=pad*0.4;
+  const X=t=>(t-t0)/wsec*pw, Y=v=>h-(v-LO)/(HI-LO)*h;
+  // Zero baseline (at peak) + right-axis separator.
+  ctx.strokeStyle="rgba(90,96,107,0.35)"; ctx.lineWidth=1; ctx.setLineDash([3,5]);
+  ctx.beginPath(); ctx.moveTo(0,Y(0)); ctx.lineTo(pw,Y(0)); ctx.stroke(); ctx.setLineDash([]);
+  ctx.strokeStyle=getCss("--line-soft"); ctx.beginPath(); ctx.moveTo(pw,0); ctx.lineTo(pw,h); ctx.stroke();
+  // Underwater fill + line.
+  ctx.beginPath(); ctx.moveTo(X(vis[0][0]+tshift),Y(0));
+  for(const [t,d] of vis) ctx.lineTo(X(t+tshift),Y(d));
+  ctx.lineTo(X(vis[vis.length-1][0]+tshift),Y(0)); ctx.closePath();
+  ctx.fillStyle="rgba(222,81,99,0.18)"; ctx.fill();
+  ctx.strokeStyle=BIN_RED; ctx.lineWidth=1.2; ctx.beginPath();
+  vis.forEach(([t,d],i)=>{ const x=X(t+tshift),y=Y(d); i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); });
+  ctx.stroke();
+  // Title + current-value tag on the right axis.
+  const cur=vis[vis.length-1][1];
+  ctx.fillStyle=getCss("--dim-2"); ctx.font="9px "+getCss("--mono"); ctx.textBaseline="top";
+  ctx.fillText("drawdown",4,2);
+  const yc=Math.max(0,Math.min(h,Y(cur)));
+  ctx.fillStyle=BIN_RED; ctx.fillRect(pw, yc-7, Math.min(AXIS_W-1,44), 14);
+  ctx.fillStyle="#fff"; ctx.textBaseline="middle"; ctx.fillText(cur.toFixed(1)+"%", pw+4, yc+1);
+}
+
 // ---------- ranges / backfill / symbols ----------
 function syncRanges(w){ document.querySelectorAll("#ranges button").forEach(b=>b.classList.toggle("active", b.dataset.w===w)); }
 document.getElementById("ranges").addEventListener("click",e=>{ if(e.target.tagName!=="BUTTON"||!active) return; const w=e.target.dataset.w; panels[active].window=w; syncRanges(w); setWindow(active,w); });
@@ -2064,6 +2174,13 @@ document.getElementById("tfSlider").addEventListener("input",e=>{
   render();
 });
 document.getElementById("addBtn").addEventListener("click", ()=>{ const v=document.getElementById("addInput").value.trim(); if(v){ addSymbol(v); document.getElementById("addInput").value=""; } });
+// Header clock (IST), ticking once a second.
+(function(){
+  const el=document.getElementById("hdrClock"); if(!el) return;
+  const f=new Intl.DateTimeFormat("en-GB",{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false,timeZone:"Asia/Kolkata"});
+  const tick=()=>{ el.textContent=f.format(new Date())+" IST"; };
+  tick(); setInterval(tick,1000);
+})();
 document.getElementById("addInput").addEventListener("keydown", e=>{ if(e.key==="Enter") document.getElementById("addBtn").click(); });
 document.getElementById("bfBtn").addEventListener("click", async ()=>{
   if(!active){ return; }
