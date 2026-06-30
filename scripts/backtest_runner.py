@@ -190,18 +190,22 @@ def run_backtest(r, live_strategy, instruments,
 
         open_pos, closed_pos = [], []
         pnl = {}
+        # Force-close open positions at last bar price so they appear in closed history.
+        # They can't be ported to live trading anyway, so showing them as open is misleading.
         for p in engine.cache.positions_open():
             px = last_px.get(str(p.instrument_id), p.avg_px_open)
-            unreal = (px - p.avg_px_open) * p.signed_qty if px else 0.0
+            realized = round((px - p.avg_px_open) * p.signed_qty, 4) if px else 0.0
             ccy = "USDT"
-            open_pos.append({
+            closed_pos.append({
                 "instrument": str(p.instrument_id), "strategy": sid,
-                "side": p.side.name, "qty": p.quantity.as_double(),
-                "avg_px": p.avg_px_open, "unrealized": round(unreal, 4),
-                "realized": p.realized_pnl.as_double() if p.realized_pnl else 0.0,
-                "ccy": ccy, "ts_opened": int(p.ts_opened // 1_000_000),
+                "side": "LONG" if p.entry.name == "BUY" else "SHORT",
+                "qty": p.quantity.as_double(),
+                "avg_px_open": p.avg_px_open, "avg_px_close": round(px, 8) if px else p.avg_px_open,
+                "realized": realized, "ccy": ccy,
+                "ts_opened": int(p.ts_opened // 1_000_000),
+                "ts_closed": end_ms,
             })
-            pnl.setdefault(ccy, {"realized": 0.0, "unrealized": 0.0})["unrealized"] += unreal
+            pnl.setdefault(ccy, {"realized": 0.0, "unrealized": 0.0})["realized"] += realized
         for p in engine.cache.positions_closed():
             rp = p.realized_pnl
             ccy = rp.currency.code if rp is not None else "USDT"
@@ -218,20 +222,6 @@ def run_backtest(r, live_strategy, instruments,
                 rp.as_double() if rp is not None else 0.0)
         for v in pnl.values():
             v["total"] = v["realized"] + v["unrealized"]
-
-        # On live handoff: treat backtest open positions as closed at end_ms
-        # (they enter the closed history) and write them to a handoff key so
-        # the live strategy can immediately re-enter the same positions.
-        if end_date is None and open_pos:
-            for p in open_pos:
-                p["ts_closed"] = end_ms
-                p["avg_px_close"] = p.get("avg_px", p.get("avg_px_open", 0))
-                p["realized"] = 0.0   # no realized PnL — closed at same price for handoff
-                closed_pos.append(p)
-            r.set(f"{BT}:handoff_positions", json.dumps(open_pos))
-            open_pos = []
-        else:
-            r.delete(f"{BT}:handoff_positions")
 
         closed_pos.sort(key=lambda c: c["ts_closed"], reverse=True)
         r.set(f"{BT}:positions", json.dumps({
@@ -250,21 +240,12 @@ def run_backtest(r, live_strategy, instruments,
                 "unrealized": 0.0,
                 "total": round(running, 4),
             })
-        # Add a final point at end_ms with any open position unrealized
-        bt_unreal = sum(p.get("unrealized", 0.0) for p in open_pos)
-        equity_pts.append({
-            "ts": end_ms,
-            "nav": round(100_000.0 + running + bt_unreal, 4),
-            "realized": round(running, 4),
-            "unrealized": round(bt_unreal, 4),
-            "total": round(running + bt_unreal, 4),
-        })
         r.set(f"{BT}:equity", json.dumps(equity_pts))
         # Store the ending NAV as the test equity starting point for the live handoff
-        r.set(f"{BT}:equity:end_nav", str(round(100_000.0 + running + bt_unreal, 4)))
+        r.set(f"{BT}:equity:end_nav", str(round(100_000.0 + running, 4)))
         _set_meta(r, status="done", strategy=sid, days=actual_days, n=len(instruments),
                   done=len(instruments), started=started, finished=time.time(),
-                  open=len(open_pos), closed=len(closed_pos), pnl=pnl,
+                  open=0, closed=len(closed_pos), pnl=pnl,
                   start_ms=start_ms, end_ms=end_ms,
                   live_handoff=(end_date is None))
         try:

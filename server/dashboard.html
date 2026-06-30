@@ -321,6 +321,9 @@
       <div class="ptile"><div class="lbl">realized pnl</div><div class="val" id="posReal">–</div></div>
       <div class="ptile"><div class="lbl">session pnl</div><div class="val" id="posTotal">–</div></div>
       <div class="ptile" id="posOverallTile"><div class="lbl">overall pnl</div><div class="val" id="posOverall">–</div></div>
+      <div class="ptile"><div class="lbl">hit rate</div><div class="val" id="posHitRate">–</div></div>
+      <div class="ptile"><div class="lbl">avg profit</div><div class="val" id="posAvgProfit">–</div></div>
+      <div class="ptile"><div class="lbl">avg loss</div><div class="val" id="posAvgLoss">–</div></div>
       <div style="display:flex;gap:6px;align-items:center;margin-left:16px;">
         <button class="tab active" id="posTabOpen" onclick="switchPosTab('open')">Open (<span id="posOpenCount">0</span>)</button>
         <button class="tab" id="posTabClosed" onclick="switchPosTab('closed')">Closed (<span id="posClosedCount">0</span>)</button>
@@ -853,7 +856,9 @@ function drawTradeMarkers(ctx,instrument,X,Y,t0,w,ch,snapBars,tfsec){
     ctx.font="700 13px ui-monospace,monospace";
     ctx.textBaseline="top";
     const tw=ctx.measureText(st.label).width;
-    let lx=x+4; if(lx+tw+6>w) lx=x-tw-8;   // flip left if it would overflow
+    let lx = m.type==="exit" ? x-tw-8 : x+4;
+    if(lx+tw+6>w) lx=x-tw-8;
+    if(lx<0) lx=x+4;
     ctx.fillStyle=st.color;
     ctx.fillRect(lx-3, 2, tw+6, 18);
     ctx.fillStyle="#000"; ctx.fillText(st.label, lx, 4);
@@ -1314,9 +1319,22 @@ function switchView(view){
   document.getElementById("positionsView").style.display = view==="positions"?"block":"none";
   document.getElementById("accountView").style.display = view==="account"?"block":"none";
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active", t.dataset.view===view));
-  if(view==="positions") renderPositions();
+  if(view==="positions"){
+    if(lastPortfolio) renderPositions();
+    else _fetchPositions();
+  }
   else if(view==="account") openAccount();
   else { if(_acctPollTimer){ clearInterval(_acctPollTimer); _acctPollTimer=null; } render(); }
+}
+
+async function _fetchPositions(){
+  try{
+    const d = await (await fetch(`/api/${currentMode}/positions`)).json();
+    if(d && !lastPortfolio){
+      lastPortfolio = {type:"portfolio", positions: d.positions||[], closed_positions: d.closed_positions||[], pnl: d.pnl||{}, strategies:[], strategy_states:{}, metrics:{}, overall_pnl:{}};
+    }
+  }catch(e){}
+  renderPositions();
 }
 function _fmtDT(ms){
   if(!ms) return "–";
@@ -1592,6 +1610,15 @@ function renderPositions(){
   if(ovEl){ ovEl.textContent=fmtPnl(ov); ovEl.className="val "+pnlClass(Object.values(ov).reduce((a,b)=>a+(b||0),0)); }
   document.getElementById("posOpenCount").textContent=open.length;
   document.getElementById("posClosedCount").textContent=closed.length;
+  // Hit rate / avg profit / avg loss from closed positions
+  const winners=closed.filter(p=>(p.realized||0)>0);
+  const losers=closed.filter(p=>(p.realized||0)<0);
+  const hitRate=closed.length>0?(winners.length/closed.length*100):null;
+  const avgProfit=winners.length>0?winners.reduce((s,p)=>s+(p.realized||0),0)/winners.length:null;
+  const avgLoss=losers.length>0?losers.reduce((s,p)=>s+(p.realized||0),0)/losers.length:null;
+  const hrEl=document.getElementById("posHitRate"); if(hrEl){ hrEl.textContent=hitRate!=null?hitRate.toFixed(1)+"%":"–"; hrEl.className="val "+(hitRate==null?"":hitRate>50?"up":hitRate<50?"down":""); }
+  const apEl=document.getElementById("posAvgProfit"); if(apEl){ apEl.textContent=avgProfit!=null?`${fmtSigned(avgProfit)} ${cc} (${winners.length})`:"–"; apEl.className="val "+(avgProfit!=null?"up":""); }
+  const alEl=document.getElementById("posAvgLoss"); if(alEl){ alEl.textContent=avgLoss!=null?`${fmtSigned(avgLoss)} ${cc} (${losers.length})`:"–"; alEl.className="val "+(avgLoss!=null?"down":""); }
   const now=Date.now();
 
   if(_posByStrategy){

@@ -306,8 +306,8 @@ _ema_SAR = EMACrossStopReverse(EMACrossSARConfig(
     instrument_ids=PERP_INSTRUMENTS_SAR,
     trade_usd=Decimal("2000"),
     bar_spec="1-MINUTE-LAST",   # 5-second bars per instrument
-    fast_ema_period=5,  
-    slow_ema_period=10,
+    fast_ema_period=60,  
+    slow_ema_period=120,
 ))
 
 node.trader.add_strategy(_ema)
