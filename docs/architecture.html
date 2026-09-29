@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NautilusTrader Dashboard — Architecture &amp; Data Flows</title>
+<style>
+  :root{
+    --bg:#0d0f13; --panel:#14171d; --panel2:#1a1e26; --line:#262b34; --line-soft:#20242c;
+    --text:#d6dae1; --dim:#9aa0aa; --dim2:#5a606b; --amber:#e0a233;
+    --green:#27be83; --red:#de5163; --blue:#4f9dde; --purple:#a855f7; --cyan:#22d3ee;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.65 -apple-system,Segoe UI,Roboto,sans-serif;}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code,.mono{font-family:var(--mono);font-size:12.5px}
+  code{background:var(--panel2);border:1px solid var(--line-soft);border-radius:4px;padding:1px 5px;color:#cfe6ff}
+  .layout{display:flex;max-width:1200px;margin:0 auto}
+  nav{position:sticky;top:0;align-self:flex-start;width:245px;height:100vh;overflow:auto;padding:24px 14px;border-right:1px solid var(--line);flex:0 0 auto}
+  nav h4{color:var(--dim2);text-transform:uppercase;letter-spacing:.08em;font-size:10.5px;margin:18px 8px 6px}
+  nav a{display:block;color:var(--dim);padding:4px 8px;border-radius:6px;font-size:12.5px}
+  nav a:hover{background:var(--panel2);color:var(--text);text-decoration:none}
+  main{flex:1 1 auto;min-width:0;padding:32px 40px 120px}
+  h1{font-size:26px;margin:0 0 6px;letter-spacing:-.01em}
+  h2{font-size:19px;margin:44px 0 10px;padding-top:10px;border-top:1px solid var(--line);letter-spacing:-.01em}
+  h3{font-size:15px;margin:26px 0 8px;color:#eef1f5}
+  p{color:var(--text)}
+  .sub{color:var(--dim);font-size:13px;margin:0 0 18px}
+  .tag{display:inline-block;font-family:var(--mono);font-size:10.5px;padding:2px 7px;border-radius:5px;border:1px solid var(--line);color:var(--dim);background:var(--panel2);margin-right:4px}
+  .tag.db0{border-color:#2b4a63;color:#8fc4ec;background:#12212c}
+  .tag.db1{border-color:#5a4a1e;color:#e0c07a;background:#221d10}
+  .tag.live{border-color:#1e5a3e;color:#7fe0b0;background:#10221a}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:14px 0}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:12.5px}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+  th{color:var(--dim2);text-transform:uppercase;font-size:10px;letter-spacing:.05em}
+  td.k{font-family:var(--mono);color:#cfe6ff;white-space:nowrap}
+  .flow{counter-reset:step;margin:12px 0;padding:0;list-style:none}
+  .flow li{position:relative;padding:10px 12px 10px 44px;border:1px solid var(--line);border-radius:8px;margin:8px 0;background:var(--panel)}
+  .flow li::before{counter-increment:step;content:counter(step);position:absolute;left:12px;top:10px;width:22px;height:22px;border-radius:50%;background:var(--panel2);border:1px solid var(--line);color:var(--amber);font-family:var(--mono);font-size:11px;display:flex;align-items:center;justify-content:center;font-weight:700}
+  .flow li b{color:#eef1f5}
+  .who{font-family:var(--mono);font-size:11px;color:var(--cyan)}
+  .callout{border-left:3px solid var(--amber);background:#1c1810;padding:10px 14px;border-radius:0 8px 8px 0;margin:14px 0;color:#e8dcc2;font-size:13px}
+  .warn{border-left-color:var(--red);background:#221216;color:#ecc4cc}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--dim);margin:8px 0 4px}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:10px;height:10px;border-radius:3px;display:inline-block}
+  svg{max-width:100%;height:auto;display:block;margin:8px 0}
+  .box-l{fill:var(--panel);stroke:var(--line);rx:8}
+  .fn{font-family:var(--mono);font-size:12px;color:var(--purple)}
+  .file{font-family:var(--mono);font-size:12px;color:var(--amber)}
+  hr{border:none;border-top:1px solid var(--line);margin:34px 0}
+  .pill-row{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0}
+</style>
+</head>
+<body>
+<div class="layout">
+<nav>
+  <div style="font-weight:700;font-size:13px;color:#fff;padding:0 8px 8px">Nautilus Dashboard</div>
+  <div style="color:var(--dim2);font-size:11px;padding:0 8px 6px">Architecture &amp; Data Flows</div>
+  <h4>Overview</h4>
+  <a href="#components">Components</a>
+  <a href="#redis">Redis topology</a>
+  <a href="#modes">Live vs Test mode</a>
+  <h4>Data flows</h4>
+  <a href="#f-marketdata">Market data → chart</a>
+  <a href="#f-subscribe">Subscriptions</a>
+  <a href="#f-portfolio">Portfolio &amp; positions</a>
+  <a href="#f-orders">Order events</a>
+  <a href="#f-equity">Equity &amp; drawdown</a>
+  <a href="#f-indicators">Indicators</a>
+  <h4>Control</h4>
+  <a href="#f-strategy">Strategy control</a>
+  <a href="#f-backtest">Backtest &amp; handoff</a>
+  <a href="#exec">Execution model</a>
+  <h4>Reference</h4>
+  <a href="#keys">Redis key reference</a>
+  <a href="#files">File map</a>
+</nav>
+<main>
+
+<h1>NautilusTrader Market-Data Dashboard</h1>
+<p class="sub">How commands and information move through the system — market data, subscriptions, portfolio snapshots, order events, equity, and the live/test split. Every arrow below maps to a real function or Redis key in the codebase.</p>
+
+<div class="callout">
+<b>One sentence:</b> a single NautilusTrader live node ingests Binance market data and runs the strategies + a simulated (sandbox) exchange; a <b>ControlActor</b> and the strategies publish everything the UI needs into <b>Redis</b>; a <b>FastAPI server</b> tails those Redis streams/keys and pushes them to the browser over a <b>WebSocket</b>; the browser draws it on a canvas. Commands flow the other way through Redis command streams.
+</div>
+
+<h2 id="components">Components</h2>
+<div class="legend">
+  <span><i class="dot" style="background:var(--green)"></i> Python process</span>
+  <span><i class="dot" style="background:var(--blue)"></i> Redis</span>
+  <span><i class="dot" style="background:var(--amber)"></i> Browser</span>
+  <span><i class="dot" style="background:var(--purple)"></i> External</span>
+</div>
+
+<svg viewBox="0 0 900 430" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace,monospace" font-size="12">
+  <defs>
+    <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#6b7280"/></marker>
+  </defs>
+  <!-- Binance -->
+  <rect x="20" y="30" width="150" height="70" rx="8" fill="#1a1220" stroke="#5b3f7a"/>
+  <text x="95" y="58" fill="#c9a7e6" text-anchor="middle">Binance</text>
+  <text x="95" y="76" fill="#8a7ba0" text-anchor="middle" font-size="10">WS + REST (LIVE)</text>
+
+  <!-- Trading node -->
+  <rect x="240" y="20" width="330" height="330" rx="10" fill="#101a14" stroke="#1e5a3e"/>
+  <text x="405" y="42" fill="#7fe0b0" text-anchor="middle" font-weight="700">TradingNode  (binance_data.py)</text>
+
+  <rect x="260" y="58" width="140" height="52" rx="7" fill="#14171d" stroke="#262b34"/>
+  <text x="330" y="80" fill="#d6dae1" text-anchor="middle" font-size="11">Data clients</text>
+  <text x="330" y="96" fill="#5a606b" text-anchor="middle" font-size="9">Binance adapter</text>
+
+  <rect x="410" y="58" width="140" height="52" rx="7" fill="#14171d" stroke="#262b34"/>
+  <text x="480" y="80" fill="#d6dae1" text-anchor="middle" font-size="11">Sandbox exec</text>
+  <text x="480" y="96" fill="#5a606b" text-anchor="middle" font-size="9">L2 matcher</text>
+
+  <rect x="260" y="122" width="140" height="52" rx="7" fill="#14171d" stroke="#262b34"/>
+  <text x="330" y="144" fill="#d6dae1" text-anchor="middle" font-size="11">Strategies</text>
+  <text x="330" y="160" fill="#5a606b" text-anchor="middle" font-size="9">EMACross / SAR</text>
+
+  <rect x="410" y="122" width="140" height="52" rx="7" fill="#14171d" stroke="#262b34"/>
+  <text x="480" y="144" fill="#d6dae1" text-anchor="middle" font-size="11">ControlActor</text>
+  <text x="480" y="160" fill="#5a606b" text-anchor="middle" font-size="9">snapshots + subs</text>
+
+  <rect x="260" y="186" width="290" height="46" rx="7" fill="#14171d" stroke="#262b34"/>
+  <text x="405" y="205" fill="#d6dae1" text-anchor="middle" font-size="11">MessageBus  +  Cache  (stream_per_topic)</text>
+  <text x="405" y="221" fill="#5a606b" text-anchor="middle" font-size="9">mirrors every bus message to Redis DB0</text>
+
+  <rect x="260" y="244" width="290" height="42" rx="7" fill="#14171d" stroke="#262b34"/>
+  <text x="405" y="264" fill="#d6dae1" text-anchor="middle" font-size="11">strategy-manager thread</text>
+  <text x="405" y="279" fill="#5a606b" text-anchor="middle" font-size="9">polls dashboard:strategy_cmds</text>
+
+  <rect x="260" y="298" width="290" height="40" rx="7" fill="#14171d" stroke="#262b34"/>
+  <text x="405" y="322" fill="#d6dae1" text-anchor="middle" font-size="11">backtest_runner (worker thread) → DB1</text>
+
+  <!-- Redis -->
+  <rect x="620" y="40" width="120" height="150" rx="10" fill="#0e1a24" stroke="#2b4a63"/>
+  <text x="680" y="64" fill="#8fc4ec" text-anchor="middle" font-weight="700">Redis</text>
+  <text x="680" y="92" fill="#8fc4ec" text-anchor="middle" font-size="11">DB0</text>
+  <text x="680" y="108" fill="#5a606b" text-anchor="middle" font-size="9">live + data</text>
+  <text x="680" y="140" fill="#e0c07a" text-anchor="middle" font-size="11">DB1</text>
+  <text x="680" y="156" fill="#5a606b" text-anchor="middle" font-size="9">backtest</text>
+
+  <!-- Dashboard server -->
+  <rect x="620" y="220" width="120" height="70" rx="10" fill="#101a14" stroke="#1e5a3e"/>
+  <text x="680" y="248" fill="#7fe0b0" text-anchor="middle" font-size="11">FastAPI</text>
+  <text x="680" y="266" fill="#5a606b" text-anchor="middle" font-size="9">app.py</text>
+
+  <!-- Browser -->
+  <rect x="620" y="320" width="120" height="70" rx="10" fill="#1c1810" stroke="#5b4a1e"/>
+  <text x="680" y="348" fill="#e6c98a" text-anchor="middle" font-size="11">Browser</text>
+  <text x="680" y="366" fill="#5a606b" text-anchor="middle" font-size="9">dashboard.html</text>
+
+  <!-- arrows -->
+  <line x1="170" y1="65" x2="238" y2="80" stroke="#6b7280" marker-end="url(#arr)"/>
+  <line x1="570" y1="150" x2="618" y2="120" stroke="#6b7280" marker-end="url(#arr)"/>
+  <text x="585" y="125" fill="#5a606b" font-size="9">writes</text>
+  <line x1="618" y1="250" x2="572" y2="215" stroke="#6b7280" marker-end="url(#arr)"/>
+  <text x="560" y="240" fill="#5a606b" font-size="9">reads/cmds</text>
+  <line x1="680" y1="218" x2="680" y2="192" stroke="#6b7280" marker-end="url(#arr)"/>
+  <line x1="680" y1="318" x2="680" y2="292" stroke="#6b7280" marker-end="url(#arr)"/>
+  <text x="690" y="308" fill="#5a606b" font-size="9">WebSocket</text>
+</svg>
+
+<div class="grid">
+  <div class="card">
+    <h3 style="margin-top:0">TradingNode <span class="file">scripts/binance_data.py</span></h3>
+    <p style="margin:0;color:var(--dim)">The Nautilus live node. Hosts the Binance data clients (real LIVE public feed), the <b>sandbox execution client</b> (simulated fills), the <b>ControlActor</b>, and the two strategies. Its MessageBus and Cache are backed by Redis DB0 with <code>stream_per_topic=True</code>, so every bus message is mirrored into a Redis stream.</p>
+  </div>
+  <div class="card">
+    <h3 style="margin-top:0">ControlActor <span class="file">src/trading/actors/control_actor.py</span></h3>
+    <p style="margin:0;color:var(--dim)">The bridge to the UI. Polls the command stream to (un)subscribe instruments for the chart, and on a 1s timer publishes the portfolio snapshot, equity points, and computed indicators into Redis.</p>
+  </div>
+  <div class="card">
+    <h3 style="margin-top:0">Dashboard server <span class="file">server/app.py</span></h3>
+    <p style="margin:0;color:var(--dim)">FastAPI. Tails Redis streams and pushes frames over a per-mode WebSocket; serves REST for equity/positions; relays UI commands into Redis command streams. Holds no trading state of its own.</p>
+  </div>
+  <div class="card">
+    <h3 style="margin-top:0">Browser client <span class="file">server/dashboard.html</span></h3>
+    <p style="margin:0;color:var(--dim)">Dependency-free canvas UI. One WebSocket carries ticks, bars, portfolio, order events, and indicators; REST is used for equity and a positions fallback.</p>
+  </div>
+</div>
+
+<h2 id="redis">Redis topology — two databases</h2>
+<p>Market data is shared; trading <i>state</i> is split by UI mode.</p>
+<div class="grid">
+  <div class="card">
+    <div class="pill-row"><span class="tag db0">DB0 — live</span> <span class="tag live">LIVE_REDIS_URL</span></div>
+    <p style="margin:8px 0 0;color:var(--dim)">The live node's cache + message bus, all market-data streams (<code>stream:data.trades.*</code>, <code>stream:data.bars.*</code>), and every <code>dashboard:*</code> key the ControlActor/strategies write. Both UI modes read market data from here.</p>
+  </div>
+  <div class="card">
+    <div class="pill-row"><span class="tag db1">DB1 — test</span> <span class="tag">TEST_REDIS_URL</span></div>
+    <p style="margin:8px 0 0;color:var(--dim)">Backtest results only: <code>dashboard:backtest:*</code> and <code>test:chart:*</code>. The dashboard reads test-mode <i>state</i> (positions/equity/bars) from here, while still reading live market data from DB0.</p>
+  </div>
+</div>
+<div class="callout">Command streams always target <b>DB0</b>. In <span class="file">app.py</span>, <span class="fn">_send_command()</span> and <span class="fn">_send_strategy_command()</span> write to the live connection <code>r</code> regardless of the client's mode — that's where the node listens.</div>
+
+<h2 id="modes">Live vs Test mode</h2>
+<p>The <code>?mode=</code> WebSocket query param (and REST path prefix) selects which backend a client talks to. Strategies are tagged <code>live</code> or <code>test</code> in <code>dashboard:strategy_modes</code>; the server filters positions/PnL/order-events by that tag so the two tabs never bleed into each other.</p>
+<table>
+  <tr><th>Concern</th><th>Live mode</th><th>Test mode</th></tr>
+  <tr><td>Market data (ticks/bars)</td><td class="k">DB0 streams</td><td class="k">DB0 streams (shared)</td></tr>
+  <tr><td>Portfolio / positions</td><td>DB0 <code>dashboard:portfolio</code>, tag = live + untagged</td><td>DB0 filtered to tag = test, merged with DB1 backtest positions</td></tr>
+  <tr><td>Equity curve</td><td class="k">dashboard:equity:live</td><td>DB1 <code>dashboard:backtest:equity</code> + DB0 <code>dashboard:equity:test</code>, glued by <code>nav_offset</code></td></tr>
+  <tr><td>Order events</td><td colspan="2">All in DB0 <code>dashboard:order_events</code>; routed to a client by the emitting strategy's mode tag (<span class="fn">_event_mode</span>)</td></tr>
+</table>
+
+<hr>
+
+<h2 id="f-marketdata">Flow 1 — Market data → chart</h2>
+<p class="sub">Binance trades/klines/depth become ticks and candles on screen.</p>
+<ol class="flow">
+  <li><b>Binance → data client.</b> <span class="who">node</span> The Binance adapter streams aggTrades, klines, and (for the SAR strategy) L2 depth into the internal MessageBus.</li>
+  <li><b>Bus → Redis.</b> <span class="who">node</span> With <code>stream_per_topic=True</code>, each message is mirrored to a Redis stream, e.g. <code>stream:data.trades.BINANCE_FUTURES.BTCUSDT-PERP</code> and <code>stream:data.bars.…-1-MINUTE-LAST-EXTERNAL</code>. (Order-book deltas are excluded via the bus <code>types_filter</code> so they never hit Redis.)</li>
+  <li><b>Server tails.</b> <span class="who">app.py</span> <span class="fn">_tail_symbol()</span> resolves the trade key with <span class="fn">find_trade_key()</span> and <code>XREAD</code>s it; <span class="fn">_tail_bars()</span> does the same per bar-type. Each keeps retrying to find its key as long as a client is subscribed (thin instruments create their stream only on first trade).</li>
+  <li><b>Server → browser.</b> <span class="who">app.py</span> New entries are pushed as <code>{type:"ticks"}</code> / <code>{type:"bars"}</code> frames to every socket in <code>symbol_clients</code> / <code>bar_clients</code>.</li>
+  <li><b>Browser renders.</b> <span class="who">client</span> <span class="fn">onTicks()</span> / <span class="fn">onBars()</span> append to the active panel and <span class="fn">render()</span> → <span class="fn">drawLine()</span>/<span class="fn">drawCandles()</span> on the canvas. The tick line, candles, trade tape, and watchlist last-price all derive from these two streams.</li>
+</ol>
+<div class="callout">History on open comes from <span class="fn">_send_history()</span> (ticks) and <span class="fn">_send_bar_history()</span> (bars, merging the <code>historical.*</code> and live streams) before the live tail starts.</div>
+
+<h2 id="f-subscribe">Flow 2 — Subscriptions</h2>
+<p class="sub">What happens when you add an instrument to the watchlist (or click a position).</p>
+<ol class="flow">
+  <li><b>Client asks.</b> <span class="who">client</span> <span class="fn">addSymbol()</span> → <code>ws.send({action:"subscribe", symbols:[id], window})</code>.</li>
+  <li><b>Server fans out.</b> <span class="who">app.py</span> Adds the socket to <code>symbol_clients</code>/<code>ind_clients</code> and, for every timeframe, to <code>bar_clients[bar_type]</code>. Sends history, starts tails (<span class="fn">_ensure_tail</span>, <span class="fn">_ensure_bar_tail</span>, <span class="fn">_ensure_indicator_tail</span>).</li>
+  <li><b>Server → node command.</b> <span class="who">app.py</span> <span class="fn">_send_command({action:"subscribe", instrument_id, bar_type})</span> → <code>XADD dashboard:commands</code> (DB0), one command per bar-type + trades.</li>
+  <li><b>ControlActor subscribes.</b> <span class="who">node</span> <span class="fn">_poll_commands()</span> reads the stream; <span class="fn">_on_command()</span> calls <span class="fn">subscribe_trade_ticks()</span> / <span class="fn">subscribe_bars()</span>. Subscriptions are <b>deduped</b> (a re-sent subscribe is a no-op) so reconnects don't spam the aggregators.</li>
+  <li><b>Data flows.</b> <span class="who">node→redis→app→client</span> The data client now streams that instrument → Redis → the tails from Flow 1 deliver it. Unsubscribe (<code>×</code> button) sends <code>{action:"unsubscribe"}</code>; the server drops the socket from the client sets (<span class="fn">_drop_bars_for_symbol</span>).</li>
+</ol>
+
+<h2 id="f-portfolio">Flow 3 — Portfolio &amp; positions</h2>
+<p class="sub">Open/closed positions, per-strategy PnL, and the trade markers on the chart.</p>
+<ol class="flow">
+  <li><b>Snapshot built.</b> <span class="who">node</span> <span class="fn">ControlActor._snapshot_portfolio()</span> runs every 1s: iterates <code>cache.positions_open()</code>/<code>positions_closed()</code>, reads <code>portfolio.unrealized_pnl()</code> and <code>net_exposure()</code>, and copies newly-closed positions into a persistent map (the exec cache purges closed positions, so the dashboard keeps its own history).</li>
+  <li><b>Written to Redis.</b> <span class="who">node</span> The whole snapshot (positions, closed_positions, prices, pnl, overall_pnl) is <code>SET</code> to <code>dashboard:portfolio</code> (DB0); closed positions are also persisted to <code>dashboard:closed_positions</code> so markers survive restarts.</li>
+  <li><b>Server reads &amp; filters.</b> <span class="who">app.py</span> <span class="fn">_portfolio_loop()</span> (every 0.25s) calls <span class="fn">_build_portfolio_sync(mode)</span>: reads <code>dashboard:portfolio</code>, looks up <code>dashboard:strategy_modes</code>, and keeps only this mode's strategies (live = tagged-live + untagged; test = tagged-test), recomputing PnL from the filtered set. Test mode also merges DB1 backtest positions.</li>
+  <li><b>Server → browser.</b> <span class="who">app.py</span> A signature check suppresses duplicate frames; changed snapshots go out as <code>{type:"portfolio"}</code> to that mode's sockets.</li>
+  <li><b>Browser renders.</b> <span class="who">client</span> <span class="fn">onPortfolio()</span> stores <code>lastPortfolio</code>; <span class="fn">renderPositions()</span> draws the tables and metric tiles, and <span class="fn">_tradeMarkers()</span> derives the entry ▲ / exit ▽ flags for the active instrument from the same object.</li>
+</ol>
+<div class="callout warn">The persistent closed-positions map is never trimmed and is re-serialized every second — a known scaling cost for very long sessions.</div>
+
+<h2 id="f-orders">Flow 4 — Order events</h2>
+<ol class="flow">
+  <li><b>Strategy emits.</b> <span class="who">node</span> On submit/fill/reject/cancel, the strategy's <span class="fn">_publish_order_event()</span> does <code>XADD dashboard:order_events</code> (DB0), tagged with its strategy id.</li>
+  <li><b>Server routes by mode.</b> <span class="who">app.py</span> A single <span class="fn">_tail_order_events()</span> reads the stream, looks up each event's strategy mode (<span class="fn">_event_mode</span>, untagged→live), and pushes only to that mode's sockets. On connect, recent events are replayed — filtered to the client's mode.</li>
+  <li><b>Browser shows.</b> <span class="who">client</span> <span class="fn">onOrderEvent()</span> maintains a per-strategy rolling order log (pending → accepted/rejected). Cleared on mode switch so reconnect replays don't duplicate.</li>
+</ol>
+
+<h2 id="f-equity">Flow 5 — Equity, return &amp; drawdown</h2>
+<ol class="flow">
+  <li><b>Live points.</b> <span class="who">node</span> Every 5s, <span class="fn">_snapshot_portfolio()</span> appends a mark-to-market point (<code>nav = 100000 + realized + unrealized</code>) to <code>dashboard:equity:live</code> / <code>dashboard:equity:test</code>, and tracks the high-water peak.</li>
+  <li><b>Backtest curve.</b> <span class="who">backtest_runner</span> Writes a per-bar mark-to-market curve to <code>dashboard:backtest:equity</code> and its ending NAV to <code>…:end_nav</code>.</li>
+  <li><b>Server stitches.</b> <span class="who">app.py</span> <span class="fn">_account_equity_sync(mode)</span>: live mode returns <code>dashboard:equity:live</code>; test mode concatenates the backtest curve with the live test points, offsetting the live portion by <code>nav_offset = end_nav − 100000</code> for continuity.</li>
+  <li><b>Browser derives all three.</b> <span class="who">client</span> <span class="fn">renderAccount()</span> plots NAV, computes <code>return = nav/START−1</code>, and a <b>running-peak</b> drawdown; the price chart's drawdown subplot uses the same high-water-mark logic on the instrument price.</li>
+</ol>
+
+<h2 id="f-indicators">Flow 6 — Indicators</h2>
+<p>Two producers write to <code>dashboard:indicators:{instrument}</code> (DB0): the <b>ControlActor</b> computes SMA/RSI/VWAP/Bollinger/Ichimoku per bar (<span class="fn">_feed_and_publish_indicator</span>), and the <b>strategies</b> publish their already-warmed fast/slow EMAs (<span class="fn">_publish_indicator</span>) so the chart draws the exact lines the strategy trades on — no cold-start recompute. The server's <span class="fn">_tail_indicators()</span> streams them; the client merges by timestamp and overlays them on the candles.</p>
+
+<hr>
+
+<h2 id="f-strategy">Flow 7 — Strategy control (arm / start / stop)</h2>
+<ol class="flow">
+  <li><b>UI action.</b> <span class="who">client</span> Start/stop/close/export buttons send a strategy action over the WebSocket.</li>
+  <li><b>Server relays.</b> <span class="who">app.py</span> <span class="fn">_send_strategy_command()</span> → <code>XADD dashboard:strategy_cmds</code> (DB0), and tags the strategy's mode in <code>dashboard:strategy_modes</code>.</li>
+  <li><b>Manager acts.</b> <span class="who">node thread</span> <span class="fn">_strategy_manager()</span> polls the stream: <code>start_strategy</code> → arm (<code>_active=True</code>) + <code>reset()</code> + <code>start()</code>; <code>stop_strategy</code>/<code>close_strategy</code> → disarm, cancel/close, stop; state is written to <code>dashboard:strategy_states</code>. Strategies auto-stop on node startup so nothing trades until you press Start.</li>
+  <li><b>On start.</b> <span class="who">node</span> <span class="fn">Strategy.on_start()</span> (when armed) registers indicators, subscribes to its bars + L2 order book, and warms the EMAs from REST history.</li>
+</ol>
+
+<h2 id="f-backtest">Flow 8 — Backtest &amp; live handoff</h2>
+<ol class="flow">
+  <li><b>Kick off.</b> <span class="who">client→app</span> <code>start_test_strategy</code> (optionally with a date range) → <code>dashboard:strategy_cmds</code>, tagged <code>test</code>.</li>
+  <li><b>Runner thread.</b> <span class="who">node thread</span> <span class="fn">run_backtest()</span> fetches Binance 1m klines (throttled REST), feeds a <code>BacktestEngine</code> (HEDGING, 10× leverage, <code>bar_execution</code>), then writes results to DB1: <code>dashboard:backtest:positions</code>, a mark-to-market <code>…:equity</code>, per-instrument <code>…:bars</code>/<code>…:indicators</code>, and chart bars under <code>test:chart:*</code>. Open positions are force-closed at the last bar so nothing bleeds into live.</li>
+  <li><b>Dashboard shows it.</b> <span class="who">app→client</span> Test-mode reads state from DB1 and merges backtest positions into the portfolio frame; the chart overlays <code>test:chart:*</code> bars.</li>
+  <li><b>Optional live handoff.</b> <span class="who">node thread</span> If no end-date was given, after the backtest the manager arms + starts the live strategy, and the test equity continues from the backtest's ending NAV via <code>nav_offset</code>.</li>
+</ol>
+
+<h2 id="exec">Execution model (sandbox)</h2>
+<p>Fills are simulated locally by a <code>SandboxExecutionClient</code> for <code>BINANCE_FUTURES</code> — there is no real order placement. Key settings (<span class="file">binance_config.py</span>):</p>
+<table>
+  <tr><th>Setting</th><th>Value</th><th>Why</th></tr>
+  <tr><td class="k">book_type</td><td>L2_MBP</td><td>Market orders walk real depth → full-size fills with slippage (vs L1 top-of-book capping fills).</td></tr>
+  <tr><td class="k">oms_type</td><td>HEDGING</td><td>Each entry is a separate position (matches the backtest venue).</td></tr>
+  <tr><td class="k">default_leverage</td><td>10×</td><td>50 positions × $2000 = $100k notional → only $10k margin, so the cap doesn't exhaust the balance.</td></tr>
+  <tr><td class="k">trade_execution</td><td>False</td><td>Trades arrive with offset timestamps → "stale trade" noise; the L2 book drives fills instead.</td></tr>
+</table>
+<p>The L2 book is fed by the strategy subscribing to Binance partial-depth (<code>subscribe_order_book_deltas</code>). These deltas reach the matcher <b>in-process</b> only — the bus <code>types_filter</code> keeps them out of Redis to avoid flooding it. The backtest can't use L2 (klines carry no depth), so it fills at the bar close via <code>bar_execution</code> — the one place live and backtest genuinely differ.</p>
+
+<hr>
+
+<h2 id="keys">Redis key reference</h2>
+<h3>DB0 — live node &amp; market data</h3>
+<table>
+  <tr><th>Key / pattern</th><th>Type</th><th>Writer → reader</th></tr>
+  <tr><td class="k">stream:data.trades.{venue}.{sym}</td><td>stream</td><td>data client → <span class="fn">_tail_symbol</span></td></tr>
+  <tr><td class="k">stream:data.bars.{bar_type}</td><td>stream</td><td>data client → <span class="fn">_tail_bars</span></td></tr>
+  <tr><td class="k">dashboard:portfolio</td><td>string(json)</td><td>ControlActor → <span class="fn">_build_portfolio_sync</span></td></tr>
+  <tr><td class="k">dashboard:closed_positions</td><td>string(json)</td><td>ControlActor (persist across restarts)</td></tr>
+  <tr><td class="k">dashboard:commands</td><td>stream</td><td>app.py → ControlActor (subscribe/backfill)</td></tr>
+  <tr><td class="k">dashboard:strategy_cmds</td><td>stream</td><td>app.py → strategy-manager (start/stop/backtest)</td></tr>
+  <tr><td class="k">dashboard:strategy_states</td><td>hash</td><td>manager → dashboard (RUNNING/STOPPED)</td></tr>
+  <tr><td class="k">dashboard:strategy_modes</td><td>hash</td><td>app.py → portfolio/order-event filters (sid→live|test)</td></tr>
+  <tr><td class="k">dashboard:strategies</td><td>set</td><td>strategies register themselves for the UI</td></tr>
+  <tr><td class="k">dashboard:metrics:{sid}</td><td>string(json)</td><td>strategy → strategy panel (description, EMAs)</td></tr>
+  <tr><td class="k">dashboard:indicators:{iid}</td><td>stream</td><td>ControlActor + strategy → <span class="fn">_tail_indicators</span></td></tr>
+  <tr><td class="k">dashboard:order_events</td><td>stream</td><td>strategy → <span class="fn">_tail_order_events</span></td></tr>
+  <tr><td class="k">dashboard:equity:live / :test</td><td>list(json)</td><td>ControlActor → <span class="fn">_account_equity_sync</span></td></tr>
+  <tr><td class="k">dashboard:equity:*:peak</td><td>string</td><td>ControlActor (high-water mark across restarts)</td></tr>
+  <tr><td class="k">dashboard:overall_pnl</td><td>string(json)</td><td>ControlActor (cross-session realized PnL)</td></tr>
+</table>
+<h3>DB1 — backtest results</h3>
+<table>
+  <tr><th>Key / pattern</th><th>Type</th><th>Writer → reader</th></tr>
+  <tr><td class="k">dashboard:backtest:positions</td><td>string(json)</td><td>backtest_runner → test-mode portfolio merge</td></tr>
+  <tr><td class="k">dashboard:backtest:equity</td><td>string(json)</td><td>backtest_runner → <span class="fn">_account_equity_sync</span></td></tr>
+  <tr><td class="k">dashboard:backtest:equity:end_nav</td><td>string</td><td>backtest_runner → <code>nav_offset</code> for live handoff</td></tr>
+  <tr><td class="k">dashboard:backtest:bars:{iid}</td><td>string(json)</td><td>backtest_runner → chart overlay</td></tr>
+  <tr><td class="k">dashboard:backtest:indicators:{iid}</td><td>string(json)</td><td>backtest_runner → chart EMA overlay</td></tr>
+  <tr><td class="k">dashboard:backtest:meta</td><td>string(json)</td><td>backtest_runner → progress/status</td></tr>
+  <tr><td class="k">test:chart:{iid}-1-MINUTE-LAST-EXTERNAL</td><td>string(json)</td><td>backtest_runner → live chart merge in test mode</td></tr>
+</table>
+
+<h2 id="files">File map</h2>
+<table>
+  <tr><th>File</th><th>Role</th></tr>
+  <tr><td class="file">scripts/binance_data.py</td><td>Node entry point: builds the TradingNode, registers strategies + ControlActor + sandbox exec, runs the strategy-manager thread.</td></tr>
+  <tr><td class="file">src/trading/configs/binance_config.py</td><td>TradingNodeConfig: data clients, sandbox exec client, message bus (Redis, <code>types_filter</code>), cache.</td></tr>
+  <tr><td class="file">src/trading/actors/control_actor.py</td><td>Command polling, market-data subscriptions (deduped), 1s portfolio/equity/indicator snapshots.</td></tr>
+  <tr><td class="file">src/trading/strategies/EMACrossShortTest.py</td><td>Stop-and-reverse EMA strategy (SAR): long/short, L2 subscription, per-strategy position cap, order-event publishing.</td></tr>
+  <tr><td class="file">src/trading/strategies/EMACross.py</td><td>Long-only EMA crossover strategy (5-second bars).</td></tr>
+  <tr><td class="file">scripts/backtest_runner.py</td><td>Threaded BacktestEngine run: fetches klines, writes DB1 results + mark-to-market equity, optional live handoff.</td></tr>
+  <tr><td class="file">server/app.py</td><td>FastAPI: WebSocket + REST, Redis tails, command relays, live/test filtering.</td></tr>
+  <tr><td class="file">server/dashboard.html</td><td>Browser client: canvas charts (Binance-style pan/zoom), positions, account, order log.</td></tr>
+</table>
+
+<p style="color:var(--dim2);font-size:11px;margin-top:40px">Generated from the codebase as documentation. Function and key names reference the actual implementation; open the linked files for exact line-level detail.</p>
+
+</main>
+</div>
+</body>
+</html>

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+<title>Offline</title>
+<style>
+  :root { --bg:#0b0e14; --panel:#11161f; --panel2:#161d29; --border:#232b38; --text:#e6edf3; --muted:#8b96a5;
+          --faint:#5c6773; --accent:#58a6ff; --red:#f85149; --amber:#d29922; }
+  html,body { margin:0; height:100%; }
+  body { background:var(--bg); color:var(--text); font:13px/1.55 "Segoe UI",system-ui,sans-serif;
+         display:grid; place-items:center; -webkit-font-smoothing:antialiased; }
+  .card { width:420px; padding:26px 28px; background:var(--panel); border:1px solid var(--border); border-radius:14px;
+          text-align:center; box-shadow:0 20px 40px rgba(0,0,0,.35); }
+  .ic { width:40px; height:40px; margin:0 auto 14px; border-radius:11px; display:grid; place-items:center;
+        background:color-mix(in srgb, var(--amber) 15%, transparent); color:var(--amber); }
+  .ic.err { background:color-mix(in srgb, var(--red) 15%, transparent); color:var(--red); }
+  .ic svg { width:20px; height:20px; stroke:currentColor; fill:none; stroke-width:2; stroke-linecap:round; }
+  h1 { font-size:15px; margin:0 0 6px; }
+  p { margin:0; color:var(--muted); }
+  code { color:var(--accent); font-family:ui-monospace,Consolas,monospace; font-size:12px; }
+  .row { display:flex; gap:8px; justify-content:center; margin-top:18px; }
+  button { font:inherit; font-size:12.5px; height:30px; padding:0 14px; border-radius:7px; cursor:pointer;
+           border:1px solid var(--border); background:var(--panel2); color:var(--text); }
+  button.go { background:#238636; border-color:#2ea043; }
+  button:hover { filter:brightness(1.15); }
+  .spin { display:inline-block; width:11px; height:11px; border:2px solid rgba(255,255,255,.3); border-top-color:#fff;
+          border-radius:50%; animation:r .8s linear infinite; vertical-align:-1px; margin-right:6px; }
+  @keyframes r { to { transform:rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="ic" id="ic"><svg viewBox="0 0 20 20"><path d="M10 5.5v5.5"/><path d="M10 14.3v.2"/><circle cx="10" cy="10" r="8"/></svg></div>
+  <h1 id="h">Server is not running</h1>
+  <p id="p">It didn't answer when the app started.</p>
+  <div class="row">
+    <button class="go" id="retry">Start it</button>
+    <button id="logs">Open logs</button>
+  </div>
+</div>
+<script>
+  const q = new URLSearchParams(location.search);
+  const id = q.get('id'), label = q.get('label') || id;
+  const port = id === 'live' ? 8000 : 8002;
+  document.getElementById('h').textContent = `${label} server is not running`;
+  document.getElementById('p').innerHTML =
+    `Nothing answered on <code>localhost:${port}</code>. The output is in <code>logs/${id}.log</code>.`;
+  const D = window.desktop.shell;
+  const btn = document.getElementById('retry');
+  btn.addEventListener('click', () => {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spin"></span>Starting...';
+    D.retry(id);
+  });
+  document.getElementById('logs').addEventListener('click', () => D.logs());
+  D.onState(st => {
+    if (st[id] === 'fail' && btn.disabled) {
+      btn.disabled = false; btn.textContent = 'Try again';
+      document.getElementById('ic').classList.add('err');
+      document.getElementById('p').innerHTML = `It didn't come up. ${(st.detail || {})[id] || ''}`;
+    }
+  });
+</script>
+</body>
+</html>

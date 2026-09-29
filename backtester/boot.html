@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Starting Nautilus…</title>
+<!--
+  Standalone boot splash.
+
+  This is opened from launch.bat as a local file the instant you double-click,
+  BEFORE postgres or the web server exist. That's the whole point: the app used
+  to sit doing nothing visible for several seconds while those started up. This
+  page needs zero backend, so it paints immediately, then polls the server and
+  hands over to the real dashboard the moment it answers.
+
+  Deliberately self-contained (no external CSS/JS/fonts) — it must render from
+  file:// with no network at all.
+-->
+<style>
+  :root {
+    --bg:#0b0e14; --panel:#11161f; --border:#232b38;
+    --text:#e6edf3; --muted:#8b96a5; --faint:#5c6773;
+    --accent:#58a6ff; --red:#f85149; --amber:#d29922;
+  }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; }
+  body {
+    background:
+      radial-gradient(760px 420px at 50% 42%, rgba(56,139,253,.10), transparent 65%),
+      var(--bg);
+    color:var(--text);
+    font:14px/1.5 -apple-system,"Segoe UI",Roboto,sans-serif;
+    display:flex; align-items:center; justify-content:center;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap { display:flex; flex-direction:column; align-items:center; }
+
+  /* four blades folding into a diamond — same mark as the in-app splash so
+     the handover to the dashboard reads as one continuous animation */
+  .mark { position:relative; width:54px; height:54px; margin-bottom:20px;
+          transform:rotate(45deg); animation:spin 2.6s cubic-bezier(.6,0,.3,1) infinite; }
+  .mark i { position:absolute; width:22px; height:22px; border-radius:3px;
+            background:var(--accent); opacity:.92; }
+  .mark i:nth-child(1){ top:0; left:0;  animation:blade 1.5s ease-in-out infinite; }
+  .mark i:nth-child(2){ top:0; right:0; animation:blade 1.5s ease-in-out .12s infinite; }
+  .mark i:nth-child(3){ bottom:0; right:0; animation:blade 1.5s ease-in-out .24s infinite; }
+  .mark i:nth-child(4){ bottom:0; left:0;  animation:blade 1.5s ease-in-out .36s infinite; }
+  @keyframes blade { 0%,100%{ transform:scale(.55); opacity:.30; } 50%{ transform:scale(1); opacity:1; } }
+  @keyframes spin  { 0%{ transform:rotate(45deg); } 100%{ transform:rotate(405deg); } }
+
+  .word { display:flex; gap:3px; font-weight:700; font-size:21px;
+          letter-spacing:.20em; margin-left:.20em; }
+  .word span { opacity:0; transform:translateY(7px);
+               animation:letter .5s cubic-bezier(.4,0,.2,1) forwards; }
+  @keyframes letter { to { opacity:1; transform:none; } }
+
+  .sub { margin-top:7px; font-size:11.5px; color:var(--faint);
+         text-transform:uppercase; letter-spacing:.26em;
+         opacity:0; animation:fade .6s .55s ease forwards; }
+  .bar { position:relative; width:190px; height:2px; margin-top:26px;
+         border-radius:999px; background:var(--border); overflow:hidden;
+         opacity:0; animation:fade .5s .65s ease forwards; }
+  .bar i { position:absolute; inset:0 auto 0 0; width:6%; border-radius:999px;
+           background:var(--accent); box-shadow:0 0 11px rgba(88,166,255,.55);
+           transition:width .4s cubic-bezier(.4,0,.2,1); }
+  .step { margin-top:11px; font-size:10.5px; color:var(--faint);
+          letter-spacing:.1em; text-transform:uppercase; min-height:14px;
+          opacity:0; animation:fade .5s .7s ease forwards; }
+  .hint { margin-top:18px; max-width:330px; text-align:center; font-size:12px;
+          color:var(--muted); line-height:1.6; opacity:0;
+          transition:opacity .4s ease; }
+  .hint.show { opacity:1; }
+  .hint b { color:var(--text); }
+  .hint code { color:var(--accent); font-family:ui-monospace,Consolas,monospace; }
+  .step.err { color:var(--red); }
+  @keyframes fade { to { opacity:1; } }
+
+  a.manual { color:var(--accent); text-decoration:none; }
+  a.manual:hover { text-decoration:underline; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .mark,.mark i { animation:none; }
+    .word span { opacity:1; transform:none; animation:none; }
+    .sub,.bar,.step { opacity:1; animation:none; }
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="mark"><i></i><i></i><i></i><i></i></div>
+    <div class="word" id="word"></div>
+    <div class="sub">backtesting workspace</div>
+    <div class="bar"><i id="fill"></i></div>
+    <div class="step" id="step">starting…</div>
+    <div class="hint" id="hint"></div>
+  </div>
+
+<script>
+(function () {
+  var URL_BASE = 'http://localhost:8002';
+  var PROBE    = URL_BASE + '/api/jobs';
+
+  // wordmark
+  var w = document.getElementById('word');
+  'NAUTILUS'.split('').forEach(function (c, i) {
+    var s = document.createElement('span');
+    s.textContent = c;
+    s.style.animationDelay = (0.05 + i * 0.05).toFixed(2) + 's';
+    w.appendChild(s);
+  });
+
+  var fill = document.getElementById('fill'),
+      step = document.getElementById('step'),
+      hint = document.getElementById('hint');
+
+  /* Minimum time the splash stays up. Without this, a warm start (server
+     already listening) detects the port in ~50ms and the whole animation is
+     gone before it renders a single frame — which just looks like a browser
+     flash. Long enough to see the mark spin and the wordmark land. */
+  var MIN_SHOW_MS = 1400;
+
+  var t0 = Date.now(), tries = 0, handedOver = false;
+
+  // The bar can't know real progress (this page has no backend yet), so it
+  // eases toward 90% on a curve tied to how long a cold start usually takes,
+  // and only snaps to 100% when the server genuinely answers. It should never
+  // look "finished" while we're still waiting.
+  function paint() {
+    var secs = (Date.now() - t0) / 1000;
+    var pct = Math.min(90, 100 * (1 - Math.exp(-secs / 4.5)));
+    fill.style.width = pct.toFixed(1) + '%';
+
+    if (secs < 1.5)      step.textContent = 'starting…';
+    else if (secs < 4)   step.textContent = 'starting database…';
+    else if (secs < 9)   step.textContent = 'starting server…';
+    else                 step.textContent = 'waiting for server…';
+
+    // If it's dragging on, stop pretending everything is fine and say what to check.
+    if (secs > 14 && !hint.classList.contains('show')) {
+      hint.innerHTML = 'Taking longer than usual. Check the <b>launch</b> console '
+        + 'window for errors — PostgreSQL may still be starting.<br>'
+        + 'You can also open <a class="manual" href="' + URL_BASE + '">' + URL_BASE + '</a> directly.';
+      hint.classList.add('show');
+    }
+  }
+  /* Driven by a timer, NOT requestAnimationFrame: rAF is suspended whenever
+     the window is backgrounded or not compositing, and during a cold start
+     it's very likely the user alt-tabs away. With rAF the bar and the
+     "taking longer than usual" hint would freeze exactly when they matter
+     most. 100ms is plenty smooth for a 190px bar. */
+  var paintTimer = setInterval(function () {
+    if (handedOver) { clearInterval(paintTimer); return; }
+    paint();
+  }, 100);
+  paint();
+
+  function handover() {
+    if (handedOver) return;
+    // Hold the splash until MIN_SHOW_MS has elapsed, then continue. On a warm
+    // start this is the only thing that makes the animation visible at all.
+    var waited = Date.now() - t0;
+    if (waited < MIN_SHOW_MS) {
+      setTimeout(handover, MIN_SHOW_MS - waited);
+      return;
+    }
+    handedOver = true;
+    fill.style.width = '100%';
+    step.textContent = 'ready';
+    // replace() so Back doesn't land the user on this splash again
+    setTimeout(function () { location.replace(URL_BASE + '/'); }, 300);
+  }
+
+  /* Detecting "is the server up?" from a file:// page is cross-origin, so we
+     can't read the response — but we don't need to. A no-cors fetch resolves
+     (opaque) when something answers and rejects on connection-refused, which
+     is exactly the signal we want. Falls back to an <img> probe on browsers
+     that dislike no-cors from file://. */
+  function probeFetch() {
+    return fetch(PROBE, { mode: 'no-cors', cache: 'no-store' }).then(function () { return true; });
+  }
+  function probeImg() {
+    return new Promise(function (resolve, reject) {
+      var img = new Image(), done = false;
+      var finish = function (ok) { if (!done) { done = true; ok ? resolve(true) : reject(); } };
+      // any response at all (even a 404 image) means the port is live
+      img.onload = function () { finish(true); };
+      img.onerror = function () { finish(false); };
+      setTimeout(function () { finish(false); }, 1500);
+      img.src = URL_BASE + '/favicon.ico?_=' + Date.now();
+    });
+  }
+
+  function poll() {
+    if (handedOver) return;
+    tries++;
+    probeFetch()
+      .then(handover)
+      .catch(function () {
+        // second opinion before we conclude it's down
+        probeImg().then(handover).catch(function () {
+          setTimeout(poll, tries < 10 ? 300 : 700);   // back off a little over time
+        });
+      });
+  }
+  poll();
+
+  // Manual escape hatch
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === 'Escape') location.replace(URL_BASE + '/');
+  });
+})();
+</script>
+</body>
+</html>

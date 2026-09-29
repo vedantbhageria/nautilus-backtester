@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>__TITLE__</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body { background-color: #0B1121; color: #F3F4F6; font-family: 'Inter', sans-serif; }
+        .slide { display: none; }
+        .slide.active { display: block; animation: fadeIn 0.3s; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+        .nav-pill { transition: all 0.2s; border: 1px solid #1F2937; }
+        .nav-pill:hover { background-color: rgba(255,255,255,0.1); }
+        .nav-pill.active { background-color: rgba(56,189,248,0.1); border-color: #38BDF8; color: #38BDF8; }
+
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #111827; }
+        ::-webkit-scrollbar-thumb { background: #374151; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #4B5563; }
+
+        .num { font-variant-numeric: tabular-nums; text-align: right; }
+        .pos { color: #34D399; }
+        .neg { color: #F87171; }
+        .param-chip { display:inline-block; background:#1F2937; border:1px solid #374151; border-radius:6px; padding:2px 8px; margin:2px; font-size:11px; color:#9CA3AF; font-family: monospace; }
+    </style>
+</head>
+<body class="h-screen flex flex-col overflow-hidden">
+
+    <header class="p-5 border-b border-gray-800 bg-gray-900 flex justify-between items-center shrink-0">
+        <h1 class="text-2xl font-bold text-sky-400 m-0">__TITLE__</h1>
+        <div class="flex gap-2 flex-wrap justify-end" id="nav-pills">
+            <button class="nav-pill active px-4 py-2 rounded-full text-sm font-medium" onclick="goToSlide(0)">1. Abstract</button>
+            <button class="nav-pill px-4 py-2 rounded-full text-sm font-medium" onclick="goToSlide(1)">2. Universe</button>
+            <button class="nav-pill px-4 py-2 rounded-full text-sm font-medium" onclick="goToSlide(2)">3. Risk-Return</button>
+            <button class="nav-pill px-4 py-2 rounded-full text-sm font-medium" onclick="goToSlide(3)">4. Matrix</button>
+            <button class="nav-pill px-4 py-2 rounded-full text-sm font-medium" onclick="goToSlide(4)">5. Equity Curves</button>
+            <button class="nav-pill px-4 py-2 rounded-full text-sm font-medium" onclick="goToSlide(5)">6. Sectors</button>
+            <button class="nav-pill px-4 py-2 rounded-full text-sm font-medium" onclick="goToSlide(6)">7. Symbols</button>
+            <button class="nav-pill px-4 py-2 rounded-full text-sm font-medium" onclick="goToSlide(7)">8. Positions</button>
+        </div>
+    </header>
+
+    <main class="flex-1 p-8 overflow-y-auto flex justify-center">
+        <div class="w-full max-w-7xl">
+
+            <div class="slide active" id="slide-0">
+                <h2 class="text-3xl font-semibold border-b border-gray-800 pb-3 mb-2">Executive Abstract &amp; Scope</h2>
+                <h3 class="text-xl text-gray-400 mb-6" id="abstract-sub">Real backtest results, generated from the dashboard.</h3>
+
+                <div class="bg-gray-900 p-6 rounded-lg border border-gray-800 leading-relaxed text-lg">
+                    <div id="abstract-body"></div>
+                    <p class="mb-2"><strong>Strategies compared (__N__ real runs):</strong></p>
+                    <ul class="list-disc list-inside space-y-1 text-base text-gray-300" id="abstract-list"></ul>
+                </div>
+            </div>
+
+            <div class="slide" id="slide-1">
+                <h2 class="text-3xl font-semibold border-b border-gray-800 pb-3 mb-2">Universe</h2>
+                <h3 class="text-xl text-gray-400 mb-6" id="universe-sub">Every symbol traded in this backtest, grouped by sector class.</h3>
+
+                <div class="flex gap-4 mb-4 bg-gray-900 p-4 rounded-lg border border-gray-800">
+                    <label class="text-sm text-gray-400 font-medium self-center whitespace-nowrap">Filter:</label>
+                    <input id="universe-filter" type="text" placeholder="symbol or sector…" class="flex-1 bg-gray-800 text-white p-2 rounded border border-gray-700 outline-none" oninput="renderUniverse()">
+                </div>
+
+                <div id="universe-grid" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"></div>
+            </div>
+
+            <div class="slide" id="slide-2">
+                <h2 class="text-3xl font-semibold border-b border-gray-800 pb-3 mb-2">Risk-Return Overlay</h2>
+                <h3 class="text-xl text-gray-400 mb-6">Interactive 2D scatter mapping for all selected runs.</h3>
+
+                <div class="flex gap-4 mb-4 bg-gray-900 p-4 rounded-lg border border-gray-800">
+                    <label class="text-sm text-gray-400 font-medium self-center">X-Axis:</label>
+                    <select id="scatter-x" class="bg-gray-800 text-white p-2 rounded border border-gray-700 outline-none" onchange="renderScatterPlot()">
+                        <option value="maxDd" selected>Max Drawdown (%)</option>
+                        <option value="trades">Total Trades (closed)</option>
+                        <option value="winRate">Win Rate (%)</option>
+                    </select>
+
+                    <label class="text-sm text-gray-400 font-medium self-center ml-4">Y-Axis:</label>
+                    <select id="scatter-y" class="bg-gray-800 text-white p-2 rounded border border-gray-700 outline-none" onchange="renderScatterPlot()">
+                        <option value="sharpe" selected>Sharpe Ratio</option>
+                        <option value="pnl">Net PnL ($)</option>
+                        <option value="returnPct">Return (%)</option>
+                    </select>
+
+                    <span class="ml-auto text-sm text-sky-400 self-center italic">Click any node for details</span>
+                </div>
+
+                <div class="flex flex-col md:flex-row gap-6">
+                    <div id="scatter-chart" class="flex-1 h-[500px] border border-gray-800 rounded-lg bg-black/20"></div>
+
+                    <div id="scatter-details" class="w-full md:w-80 bg-gray-900 border border-gray-800 rounded-lg p-5 hidden flex-col">
+                        <h4 id="sd-name" class="text-xl font-bold text-sky-400 border-b border-gray-700 pb-2 mb-4">Strat Name</h4>
+                        <div class="flex justify-between mb-3"><span class="text-gray-400">Net PnL:</span> <span id="sd-pnl" class="font-mono font-semibold"></span></div>
+                        <div class="flex justify-between mb-3"><span class="text-gray-400">Return:</span> <span id="sd-return" class="font-mono font-semibold"></span></div>
+                        <div class="flex justify-between mb-3"><span class="text-gray-400">Sharpe:</span> <span id="sd-sharpe" class="font-mono font-semibold"></span></div>
+                        <div class="flex justify-between mb-3"><span class="text-gray-400">Max DD:</span> <span id="sd-dd" class="font-mono font-semibold"></span></div>
+                        <div class="flex justify-between mb-3"><span class="text-gray-400">Win Rate:</span> <span id="sd-win" class="font-mono font-semibold"></span></div>
+                        <div class="flex justify-between mb-3"><span class="text-gray-400">Trades (closed):</span> <span id="sd-trades" class="font-mono font-semibold"></span></div>
+                        <div id="sd-params" class="mt-2 pt-3 border-t border-gray-700"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="slide" id="slide-3">
+                <h2 class="text-3xl font-semibold border-b border-gray-800 pb-3 mb-2">Performance Matrix</h2>
+                <h3 class="text-xl text-gray-400 mb-6">Aggregated backtest metrics (raw <code>results.json</code> summary data).</h3>
+
+                <div class="flex gap-4 mb-4 bg-gray-900 p-4 rounded-lg border border-gray-800">
+                    <label class="text-sm text-gray-400 font-medium self-center">Filter View:</label>
+                    <select id="matrix-filter" class="bg-gray-800 text-white p-2 rounded border border-gray-700 outline-none flex-1" onchange="renderMatrix()">
+                        <option value="all" selected>All Strategies</option>
+                        <option value="top3">Top 3 (by Net PnL)</option>
+                        <option value="bottom3">Bottom 3 (by Net PnL)</option>
+                    </select>
+                </div>
+
+                <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-x-auto">
+                    <table class="w-full whitespace-nowrap text-left border-collapse">
+                        <thead class="bg-black/40 text-gray-400 text-sm uppercase tracking-wider">
+                            <tr>
+                                <th class="p-4 border-b border-gray-800">Strategy</th>
+                                <th class="num p-4 border-b border-gray-800">Net PnL</th>
+                                <th class="num p-4 border-b border-gray-800">Return</th>
+                                <th class="num p-4 border-b border-gray-800">Win Rate</th>
+                                <th class="num p-4 border-b border-gray-800">Trades</th>
+                                <th class="num p-4 border-b border-gray-800">Open Pos.</th>
+                                <th class="num p-4 border-b border-gray-800">Max DD</th>
+                                <th class="num p-4 border-b border-gray-800">Sharpe</th>
+                                <th class="p-4 border-b border-gray-800">Params</th>
+                            </tr>
+                        </thead>
+                        <tbody id="matrix-tbody" class="text-sm">
+                        </tbody>
+                    </table>
+                </div>
+                <p class="text-sm text-gray-500 mt-3">Trades = closed positions (a single flip generates two fills, so "Trades Total" in the underlying data can run higher). Open Pos. = symbols still holding a position at the end of the window &mdash; these carry unrealised PnL not reflected in Net PnL.</p>
+            </div>
+
+            <div class="slide" id="slide-4">
+                <h2 class="text-3xl font-semibold border-b border-gray-800 pb-3 mb-2">Equity Curves</h2>
+                <h3 class="text-xl text-gray-400 mb-6">Actual cumulative portfolio value over the backtest window.</h3>
+
+                <div class="flex gap-4 mb-4 bg-gray-900 p-4 rounded-lg border border-gray-800">
+                    <label class="text-sm text-gray-400 font-medium self-center whitespace-nowrap">Highlight Strategy:</label>
+                    <select id="equity-strategy-select" class="flex-1 bg-gray-800 text-white p-2 rounded border border-gray-700 outline-none" onchange="renderEquityChart()">
+                        <option value="all" selected>Compare All Strategies</option>
+                    </select>
+                    <label class="text-sm text-gray-400 font-medium self-center ml-4 whitespace-nowrap">View:</label>
+                    <select id="equity-view-select" class="bg-gray-800 text-white p-2 rounded border border-gray-700 outline-none" onchange="renderEquityChart()">
+                        <option value="equity" selected>Equity ($)</option>
+                        <option value="drawdown">Drawdown (underwater %)</option>
+                    </select>
+                </div>
+
+                <div id="equity-chart" class="w-full h-[450px] border border-gray-800 rounded-lg bg-black/20"></div>
+                <p class="text-sm text-gray-500 mt-3" id="equity-note"></p>
+            </div>
+
+            <div class="slide" id="slide-5">
+                <h2 class="text-3xl font-semibold border-b border-gray-800 pb-3 mb-2">Sector Attribution</h2>
+                <h3 class="text-xl text-gray-400 mb-6">Real per-symbol PnL/trades aggregated by sector class.</h3>
+
+                <div class="flex flex-col md:flex-row gap-4 mb-4 bg-gray-900 p-4 rounded-lg border border-gray-800">
+                    <select id="sector-mode-select" class="flex-1 bg-gray-800 text-white p-2 rounded border border-gray-700 outline-none" onchange="toggleSectorMode()">
+                        <option value="single-strat" selected>Compare Sectors (Single Strategy)</option>
+                        <option value="single-sector">Compare Strategies (Single Sector)</option>
+                    </select>
+
+                    <select id="sector-strategy-select" class="flex-1 bg-gray-800 text-white p-2 rounded border border-gray-700 outline-none" onchange="renderSectorChart()"></select>
+
+                    <select id="sector-name-select" class="flex-1 bg-gray-800 text-white p-2 rounded border border-gray-700 outline-none hidden" onchange="renderSectorChart()"></select>
+
+                    <select id="sector-metric-select" class="flex-1 bg-gray-800 text-white p-2 rounded border border-gray-700 outline-none" onchange="renderSectorChart()">
+                        <option value="pnl" selected>Metric: Net PnL ($)</option>
+                        <option value="winRate">Metric: Win Rate (%)</option>
+                        <option value="trades">Metric: Total Trades</option>
+                    </select>
+                </div>
+
+                <div id="sector-chart" class="w-full h-[450px] border border-gray-800 rounded-lg bg-black/20"></div>
+            </div>
+
+            <div class="slide" id="slide-6">
+                <h2 class="text-3xl font-semibold border-b border-gray-800 pb-3 mb-2">Symbol Outliers (Top &amp; Bottom 10)</h2>
+                <h3 class="text-xl text-gray-400 mb-6">Real per-symbol PnL &mdash; the best and worst performing assets for the selected run.</h3>
+
+                <div class="flex gap-4 mb-4 bg-gray-900 p-4 rounded-lg border border-gray-800">
+                    <label class="text-sm text-gray-400 font-medium self-center whitespace-nowrap">Analyze Strategy:</label>
+                    <select id="symbol-strategy-select" class="flex-1 bg-gray-800 text-white p-2 rounded border border-gray-700 outline-none" onchange="renderSymbolChart()"></select>
+                </div>
+
+                <div id="symbol-chart" class="w-full h-[450px] border border-gray-800 rounded-lg bg-black/20"></div>
+            </div>
+
+            <div class="slide" id="slide-7">
+                <h2 class="text-3xl font-semibold border-b border-gray-800 pb-3 mb-2">Position Profit Distribution</h2>
+                <h3 class="text-xl text-gray-400 mb-6" id="positions-sub">Real per-position PnL (post-commission) for every closed trade in the selected run.</h3>
+
+                <div class="flex gap-4 mb-4 bg-gray-900 p-4 rounded-lg border border-gray-800">
+                    <label class="text-sm text-gray-400 font-medium self-center whitespace-nowrap">Analyze Strategy:</label>
+                    <select id="positions-strategy-select" class="flex-1 bg-gray-800 text-white p-2 rounded border border-gray-700 outline-none" onchange="renderPositionsChart()"></select>
+                    <label class="text-sm text-gray-400 font-medium self-center ml-4 whitespace-nowrap">Bins:</label>
+                    <input id="positions-bins" type="number" min="10" max="200" value="60" class="w-20 bg-gray-800 text-white p-2 rounded border border-gray-700 outline-none" onchange="renderPositionsChart()">
+                </div>
+
+                <div id="positions-chart" class="w-full h-[450px] border border-gray-800 rounded-lg bg-black/20"></div>
+                <div id="positions-stats" class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4"></div>
+            </div>
+
+        </div>
+    </main>
+
+    <script id="report-data" type="application/json">__DATA_JSON__</script>
+    <script>
+        const REPORT = JSON.parse(document.getElementById('report-data').textContent);
+        const strategies = REPORT.strategies;
+        const perSymbol = REPORT.perSymbol;
+        const equityData = REPORT.equity;
+        const positionsData = REPORT.positions || {};
+        const CLASSES = REPORT.classes;
+        const META = REPORT.meta || {};
+        const SECTORS = [...new Set(Object.values(CLASSES))].sort();
+
+        function fmtMoney(v) { return `$${(v||0).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`; }
+        function paramChips(strat) {
+            return Object.entries(strat.params).map(([k,v]) => `<span class="param-chip">${k}=${v}</span>`).join(' ');
+        }
+
+        // --- ABSTRACT (dynamic) ---
+        function renderAbstract() {
+            document.getElementById('abstract-sub').textContent =
+                `${strategies.length} real backtest run(s) generated from the dashboard, ${META.symbols || '?'} symbols, ${META.timeframe || ''} bars.`;
+            document.getElementById('abstract-body').innerHTML = `
+                <p class="mb-2"><strong>Testing Period:</strong> ${META.window_start || '?'} &mdash; ${META.window_end || '?'}</p>
+                <p class="mb-2"><strong>Data Resolution:</strong> ${META.timeframe || '?'} bars.</p>
+                <p class="mb-6"><strong>Universe:</strong> ${META.symbols || '?'} symbols, $${(META.trade_usd||0).toLocaleString()} notional/trade, ${META.leverage||'?'}x leverage, $${(META.start_cash||100000).toLocaleString()} starting cash.</p>
+                <p class="mb-4"><strong>Objective:</strong> Compare the selected runs' net profitability, risk and turnover directly from stored backtest results &mdash; nothing here is simulated or synthetic.</p>`;
+            document.getElementById('abstract-list').innerHTML = strategies.map(s =>
+                `<li><strong>${s.name}</strong> &mdash; ${paramChips(s)}</li>`).join('');
+        }
+
+        // --- UNIVERSE (all symbols grouped by sector class, like the Compare tab) ---
+        function renderUniverse() {
+            const filter = (document.getElementById('universe-filter').value || '').trim().toLowerCase();
+            const bySector = {};
+            for (const sec of SECTORS) bySector[sec] = [];
+            for (const [sym, sec] of Object.entries(CLASSES)) (bySector[sec] || (bySector[sec] = [])).push(sym);
+
+            document.getElementById('universe-sub').textContent =
+                `${Object.keys(CLASSES).length} symbols across ${SECTORS.length} sectors, as classified in this project's symbol_classes registry.`;
+
+            const cards = Object.entries(bySector)
+                .sort((a, b) => b[1].length - a[1].length)
+                .map(([sec, syms]) => {
+                    const secMatches = sec.toLowerCase().includes(filter);
+                    const shown = filter && !secMatches
+                        ? syms.filter(s => s.toLowerCase().includes(filter))
+                        : syms;
+                    if (filter && !secMatches && !shown.length) return '';
+                    return `<div class="bg-gray-900 p-5 rounded-lg border border-gray-800">
+                        <h4 class="text-lg font-bold text-sky-400 mb-1">${sec}</h4>
+                        <p class="text-xs text-gray-500 mb-3">${syms.length} symbol${syms.length === 1 ? '' : 's'}</p>
+                        <div class="flex flex-wrap gap-1">
+                            ${shown.sort().map(s => `<span class="param-chip">${s}</span>`).join('')}
+                        </div>
+                    </div>`;
+                }).filter(Boolean);
+
+            document.getElementById('universe-grid').innerHTML = cards.length ? cards.join('') :
+                '<p class="text-gray-500 col-span-full">No symbols match that filter.</p>';
+        }
+
+        // --- MATRIX ---
+        function renderMatrix() {
+            const filter = document.getElementById('matrix-filter').value;
+            let displayStrats = [...strategies];
+            if (filter === 'top3') { displayStrats.sort((a,b) => b.pnl - a.pnl); displayStrats = displayStrats.slice(0, 3); }
+            else if (filter === 'bottom3') { displayStrats.sort((a,b) => a.pnl - b.pnl); displayStrats = displayStrats.slice(0, 3); }
+
+            document.getElementById('matrix-tbody').innerHTML = displayStrats.map(s => `
+                <tr class="hover:bg-gray-800/50 transition-colors">
+                    <td class="p-4 border-b border-gray-800 font-medium">${s.name}</td>
+                    <td class="num p-4 border-b border-gray-800 ${s.pnl >= 0 ? 'pos' : 'neg'}">${fmtMoney(s.pnl)}</td>
+                    <td class="num p-4 border-b border-gray-800 ${s.returnPct >= 0 ? 'pos' : 'neg'}">${(s.returnPct||0).toFixed(2)}%</td>
+                    <td class="num p-4 border-b border-gray-800">${(s.winRate||0).toFixed(1)}%</td>
+                    <td class="num p-4 border-b border-gray-800">${(s.trades||0).toLocaleString()}</td>
+                    <td class="num p-4 border-b border-gray-800">${s.openPositions||0}</td>
+                    <td class="num p-4 border-b border-gray-800 text-red-400">${(s.maxDd||0).toFixed(2)}%</td>
+                    <td class="num p-4 border-b border-gray-800 font-medium ${s.sharpe >= 1 ? 'pos' : (s.sharpe < 0 ? 'neg' : 'text-gray-300')}">${(s.sharpe||0).toFixed(2)}</td>
+                    <td class="p-4 border-b border-gray-800">${paramChips(s)}</td>
+                </tr>
+            `).join('');
+        }
+
+        // --- SCATTER ---
+        function renderScatterPlot() {
+            const xAxis = document.getElementById('scatter-x').value;
+            const yAxis = document.getElementById('scatter-y').value;
+            const chartDiv = document.getElementById('scatter-chart');
+            const trace = {
+                x: strategies.map(s => s[xAxis]), y: strategies.map(s => s[yAxis]),
+                text: strategies.map(s => s.name), mode: 'markers+text', textposition: 'top center',
+                marker: { size: 16, color: '#38BDF8', line: { color: '#0B1121', width: 2 } },
+                type: 'scatter', customdata: strategies, hoverinfo: 'none'
+            };
+            const layout = {
+                dragmode: false, paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#9CA3AF', family: 'Inter' },
+                xaxis: { title: xAxis, gridcolor: '#1F2937', zerolinecolor: '#374151', fixedrange: true },
+                yaxis: { title: yAxis, gridcolor: '#1F2937', zerolinecolor: '#374151', fixedrange: true },
+                margin: { t: 40, l: 60, r: 40, b: 60 }
+            };
+            Plotly.newPlot(chartDiv, [trace], layout, {responsive: true, displayModeBar: false});
+            chartDiv.removeAllListeners('plotly_click');
+            chartDiv.on('plotly_click', function(data) {
+                const strat = data.points[0].customdata;
+                const panel = document.getElementById('scatter-details');
+                const wasHidden = panel.classList.contains('hidden');
+                panel.classList.remove('hidden'); panel.classList.add('flex');
+                // Plotly renders its SVG at a fixed pixel width and has no way to
+                // know the flex container just shrank to make room for this panel
+                // (no window resize event fires) — without an explicit resize the
+                // chart stays at its old full width and visually sits under/over
+                // the newly-shown panel instead of beside it.
+                if (wasHidden) requestAnimationFrame(() => Plotly.Plots.resize(chartDiv));
+                document.getElementById('sd-name').innerText = strat.name;
+                document.getElementById('sd-pnl').innerText = fmtMoney(strat.pnl);
+                document.getElementById('sd-pnl').className = `font-mono font-semibold ${strat.pnl >= 0 ? 'pos' : 'neg'}`;
+                document.getElementById('sd-return').innerText = `${(strat.returnPct||0).toFixed(2)}%`;
+                document.getElementById('sd-return').className = `font-mono font-semibold ${strat.returnPct >= 0 ? 'pos' : 'neg'}`;
+                document.getElementById('sd-sharpe').innerText = (strat.sharpe||0).toFixed(2);
+                document.getElementById('sd-dd').innerText = `${(strat.maxDd||0).toFixed(2)}%`;
+                document.getElementById('sd-win').innerText = `${(strat.winRate||0).toFixed(2)}%`;
+                document.getElementById('sd-trades').innerText = (strat.trades||0).toLocaleString();
+                document.getElementById('sd-params').innerHTML = paramChips(strat);
+            });
+        }
+
+        // --- EQUITY / DRAWDOWN ---
+        // Underwater series: % below the running peak so far, at every point
+        // in the same real equity curve used elsewhere — not a separate
+        // simulation, just a different transform of the same numbers.
+        function drawdownSeries(pts) {
+            let peak = -Infinity;
+            return pts.map(p => {
+                peak = Math.max(peak, p[1]);
+                return peak > 0 ? (p[1] / peak - 1) * 100 : 0;
+            });
+        }
+        function renderEquityChart() {
+            const highlightId = document.getElementById('equity-strategy-select').value;
+            const view = document.getElementById('equity-view-select').value;
+            const isDD = view === 'drawdown';
+            const traces = strategies.map(strat => {
+                const pts = equityData[strat.id];
+                const isHighlighted = highlightId === 'all' || highlightId === strat.id;
+                const isSelected = highlightId === strat.id;
+                const y = isDD ? drawdownSeries(pts) : pts.map(p => p[1]);
+                return {
+                    x: pts.map(p => p[0].slice(0,10)), y, name: strat.name,
+                    type: 'scatter', mode: 'lines', fill: isDD ? 'tozeroy' : 'none',
+                    fillcolor: isDD ? 'rgba(248,113,113,0.08)' : undefined,
+                    opacity: isHighlighted ? (isSelected ? 1 : 0.85) : 0.12,
+                    line: { width: isHighlighted ? (isSelected ? 3 : 1.5) : 1,
+                            color: isSelected ? '#38BDF8' : (isDD ? '#F87171' : (strat.pnl >= 0 ? '#34D399' : '#F87171')) },
+                    hoverinfo: isHighlighted ? 'y+name' : 'none'
+                };
+            });
+            const layout = {
+                dragmode: false, paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#9CA3AF', family: 'Inter' },
+                xaxis: { title: 'Date', gridcolor: '#1F2937', zerolinecolor: '#374151', fixedrange: true },
+                yaxis: isDD
+                    ? { title: 'Drawdown from peak (%)', gridcolor: '#1F2937', zerolinecolor: '#374151', ticksuffix: '%', fixedrange: true }
+                    : { title: 'Portfolio Value ($)', gridcolor: '#1F2937', zerolinecolor: '#374151', tickprefix: '$', fixedrange: true },
+                margin: { t: 20, l: 60, r: 20, b: 60 }, showlegend: true, legend: { font: { size: 10 } }
+            };
+            Plotly.newPlot('equity-chart', traces, layout, {responsive: true, displayModeBar: false});
+            document.getElementById('equity-note').textContent = isDD
+                ? 'Underwater chart: % below the running peak so far, computed from the same real equity curve above — not a separate simulation. A single strategy is easiest to read at a time.'
+                : '';
+        }
+
+        // --- SECTORS ---
+        function sectorAgg(stratId, sectorName) {
+            const rows = perSymbol[stratId].filter(r => CLASSES[r.symbol] === sectorName);
+            const pnl = rows.reduce((a,r) => a + r.pnl, 0);
+            const trades = rows.reduce((a,r) => a + r.trades, 0);
+            const won = rows.reduce((a,r) => a + r.won, 0);
+            return { pnl, trades, winRate: trades ? (won/trades*100) : 0, n: rows.length };
+        }
+        function toggleSectorMode() {
+            const mode = document.getElementById('sector-mode-select').value;
+            document.getElementById('sector-strategy-select').classList.toggle('hidden', mode !== 'single-strat');
+            document.getElementById('sector-name-select').classList.toggle('hidden', mode === 'single-strat');
+            renderSectorChart();
+        }
+        function renderSectorChart() {
+            const mode = document.getElementById('sector-mode-select').value;
+            const metric = document.getElementById('sector-metric-select').value;
+            let trace, layoutTitle;
+            if (mode === 'single-strat') {
+                const stratId = document.getElementById('sector-strategy-select').value;
+                const strat = strategies.find(s => s.id === stratId) || strategies[0];
+                const data = SECTORS.map(sec => sectorAgg(strat.id, sec));
+                trace = { x: SECTORS, y: data.map(d => d[metric]), type: 'bar',
+                          marker: { color: data.map(d => d.pnl >= 0 ? '#34D399' : '#F87171') } };
+                layoutTitle = `Sector Breakdown for ${strat.name}`;
+            } else {
+                const sectorName = document.getElementById('sector-name-select').value || SECTORS[0];
+                const data = strategies.map(strat => sectorAgg(strat.id, sectorName));
+                trace = { x: strategies.map(s => s.name), y: data.map(d => d[metric]), type: 'bar',
+                          marker: { color: '#38BDF8' } };
+                layoutTitle = `Strategy Comparison for ${sectorName} Sector`;
+            }
+            const layout = {
+                dragmode: false, paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#9CA3AF', family: 'Inter' },
+                xaxis: { gridcolor: '#1F2937', tickangle: -45, fixedrange: true },
+                yaxis: { title: document.getElementById('sector-metric-select').options[document.getElementById('sector-metric-select').selectedIndex].text, gridcolor: '#1F2937', zerolinecolor: '#374151', fixedrange: true },
+                margin: { t: 40, l: 60, r: 20, b: 100 }, title: { text: layoutTitle, font: { color: '#F3F4F6', size: 14 } }
+            };
+            Plotly.newPlot('sector-chart', [trace], layout, {responsive: true, displayModeBar: false});
+        }
+
+        // --- SYMBOL OUTLIERS ---
+        function renderSymbolChart() {
+            const stratId = document.getElementById('symbol-strategy-select').value;
+            const strat = strategies.find(s => s.id === stratId) || strategies[0];
+            const syms = [...perSymbol[strat.id]].sort((a,b) => b.pnl - a.pnl);
+            const combined = [...syms.slice(0, 10), ...syms.slice(-10)];
+            const trace = { x: combined.map(s => s.symbol), y: combined.map(s => s.pnl), type: 'bar',
+                             marker: { color: combined.map(s => s.pnl >= 0 ? '#34D399' : '#F87171') } };
+            const layout = {
+                dragmode: false, paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#9CA3AF', family: 'Inter' },
+                xaxis: { gridcolor: '#1F2937', tickangle: -45, type: 'category', fixedrange: true },
+                yaxis: { title: 'Net PnL ($)', gridcolor: '#1F2937', zerolinecolor: '#374151', fixedrange: true },
+                margin: { t: 20, l: 60, r: 20, b: 80 }
+            };
+            Plotly.newPlot('symbol-chart', [trace], layout, {responsive: true, displayModeBar: false});
+        }
+
+        // --- POSITIONS (per-trade PnL distribution) ---
+        function renderPositionsChart() {
+            const stratId = document.getElementById('positions-strategy-select').value;
+            const strat = strategies.find(s => s.id === stratId) || strategies[0];
+            const pnls = positionsData[strat.id] || [];
+            const bins = Math.max(10, Math.min(200, parseInt(document.getElementById('positions-bins').value, 10) || 60));
+            // the underlying job only persists the most recent 2000 trades per
+            // run (results.json size cap) — say so plainly when a strategy's
+            // real trade count exceeds what's stored, so the histogram isn't
+            // read as the full population when it's actually a recent-tail sample
+            const truncated = strat.trades > pnls.length;
+            document.getElementById('positions-sub').textContent = truncated
+                ? `${pnls.length.toLocaleString()} of ${strat.trades.toLocaleString()} closed positions for ${strat.name} — most recent trades only (results.json caps stored trades at 2,000; real PnL, post-commission).`
+                : `${pnls.length.toLocaleString()} closed position(s) for ${strat.name} — real per-trade PnL (post-commission).`;
+
+            const wins = pnls.filter(v => v > 0), losses = pnls.filter(v => v <= 0);
+            const lo = Math.min(...pnls), hi = Math.max(...pnls);
+            const size = (hi - lo) / bins || 1;
+            const trace = {
+                x: pnls, type: 'histogram',
+                xbins: { start: lo, end: hi, size },
+                marker: { color: '#38BDF8', line: { color: '#0B1121', width: 1 } }
+            };
+            const layout = {
+                dragmode: false, paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#9CA3AF', family: 'Inter' },
+                xaxis: { title: 'Position PnL ($)', gridcolor: '#1F2937', zerolinecolor: '#374151', fixedrange: true },
+                yaxis: { title: 'Number of positions', gridcolor: '#1F2937', zerolinecolor: '#374151', fixedrange: true },
+                shapes: [{ type: 'line', x0: 0, x1: 0, y0: 0, y1: 1, yref: 'paper',
+                          line: { color: '#9CA3AF', width: 1, dash: 'dot' } }],
+                margin: { t: 20, l: 60, r: 20, b: 60 }
+            };
+            Plotly.newPlot('positions-chart', [trace], layout, {responsive: true, displayModeBar: false});
+
+            const avg = arr => arr.length ? arr.reduce((a,b) => a+b, 0) / arr.length : 0;
+            const stat = (label, val, cls) => `<div class="bg-gray-900 p-4 rounded-lg border border-gray-800">
+                <div class="text-xs text-gray-500 uppercase tracking-wider mb-1">${label}</div>
+                <div class="text-xl font-mono font-semibold ${cls||''}">${val}</div></div>`;
+            document.getElementById('positions-stats').innerHTML = [
+                stat('Winners', `${wins.length} (${pnls.length ? (wins.length/pnls.length*100).toFixed(1) : '0.0'}%)`, 'pos'),
+                stat('Losers', `${losses.length} (${pnls.length ? (losses.length/pnls.length*100).toFixed(1) : '0.0'}%)`, 'neg'),
+                stat('Avg winner', fmtMoney(avg(wins)), 'pos'),
+                stat('Avg loser', fmtMoney(avg(losses)), 'neg'),
+            ].join('');
+        }
+
+        // --- Navigation & Init ---
+        let currentSlide = 0;
+        function goToSlide(index) {
+            document.querySelectorAll('.slide').forEach((el, i) => el.classList.toggle('active', i === index));
+            document.querySelectorAll('.nav-pill').forEach((el, i) => el.classList.toggle('active', i === index));
+            currentSlide = index;
+            setTimeout(() => {
+                if (currentSlide === 1) renderUniverse();
+                if (currentSlide === 2) renderScatterPlot();
+                if (currentSlide === 4) renderEquityChart();
+                if (currentSlide === 5) renderSectorChart();
+                if (currentSlide === 6) renderSymbolChart();
+                if (currentSlide === 7) renderPositionsChart();
+            }, 50);
+        }
+
+        window.onload = () => {
+            const sectorSelect = document.getElementById('sector-strategy-select');
+            const symbolSelect = document.getElementById('symbol-strategy-select');
+            const equitySelect = document.getElementById('equity-strategy-select');
+            const positionsSelect = document.getElementById('positions-strategy-select');
+            const sectorNameSelect = document.getElementById('sector-name-select');
+            strategies.forEach(s => {
+                sectorSelect.add(new Option(s.name, s.id));
+                symbolSelect.add(new Option(s.name, s.id));
+                equitySelect.add(new Option(s.name, s.id));
+                positionsSelect.add(new Option(s.name, s.id));
+            });
+            SECTORS.forEach(sec => sectorNameSelect.add(new Option(sec, sec)));
+            renderAbstract();
+            renderMatrix();
+        };
+    </script>
+</body>
+</html>

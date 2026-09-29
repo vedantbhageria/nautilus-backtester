@@ -22,3 +22,13 @@ logs/
 # OS / editor
 .DS_Store
 Thumbs.db
+
+# backtester (backtrader-style portal on the Nautilus engine): generated data
+backtester/reports/
+backtester/report_out/
+backtester/datas/
+backtester/datas_1h/
+
+# desktop (Electron) app
+desktop/node_modules/
+desktop/dist/

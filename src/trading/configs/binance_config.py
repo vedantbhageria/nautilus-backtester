@@ -1,8 +1,9 @@
 import os
 from decimal import Decimal
-from urllib.parse import urlparse
 
 from dotenv import load_dotenv
+
+from trading import redis_io
 
 from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.model.identifiers import TraderId
@@ -26,13 +27,15 @@ BINANCE_SPOT = "BINANCE_SPOT"          # instruments -> e.g. BTCUSDT.BINANCE_SPO
 BINANCE_FUTURES = "BINANCE_FUTURES"    # instruments -> e.g. BTCUSDT-PERP.BINANCE_FUTURES
 
 load_dotenv()
-_redis = urlparse(os.getenv("REDIS_URL", "redis://localhost:6379"))
+# Same address every other component uses (127.0.0.1, never "localhost": that
+# tries IPv6 first and Redis in WSL only listens on IPv4).
+_host, _port, _user, _password = redis_io.host_port()
 redis_db = DatabaseConfig(
     type="redis",
-    host=_redis.hostname or "localhost",
-    port=_redis.port or 6379,
-    username=_redis.username,
-    password=_redis.password,
+    host=_host,
+    port=_port,
+    username=_user,
+    password=_password,
 )
 
 _retention = int(os.getenv("STREAM_RETENTION_MINS", "4320"))  # 3 days

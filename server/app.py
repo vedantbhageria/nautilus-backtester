@@ -1,34 +1,52 @@
-"""Dashboard server — live + test mode separation.
+"""Dashboard server: WebSocket + REST bridge between the browser and Redis.
 
-Live mode : market data + state from LIVE_REDIS_URL (db 0, default).
-Test mode : market data from LIVE_REDIS_URL (shared live feed),
-            state (portfolio / positions / strategy) from TEST_REDIS_URL (db 1).
+Live mode: market data + state from Redis DB 0.
+Test mode: the same market data; positions/PnL filtered to strategies tagged
+"test", merged with backtest results from DB 1.
 
-Both modes use identical WebSocket and REST APIs; the ?mode= query param
-selects which backend each client talks to.
+Reliability contract with the browser
+* Every command is validated here and refused with a reason (4xx/503) instead
+  of being queued blindly. Strategy commands are refused while the node's
+  heartbeat is stale: a queued "start" executing an hour later is worse than an
+  error now. Accepted commands get a ``cmd_id``; the node answers with a
+  notification carrying it.
+* Notifications (``dashboard:notifications``) are pushed to every client and
+  replayed on connect. A watchdog adds its own for Redis outages and a silent
+  node, delivered directly if Redis itself is the thing that's down.
+* ``/api/health`` and ``/api/consistency`` expose component health and the full
+  consistency report (see ``trading.consistency``).
 """
+from __future__ import annotations
 
+import asyncio
+import json
+import logging
 import os
 import re
-import json
-import asyncio
 import time
-from datetime import datetime
+import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime
 
-import redis as syncredis
 import redis.asyncio as aioredis
-from redis.exceptions import RedisError
-from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, Response
+from redis.exceptions import RedisError
 
-load_dotenv()
+from server import pg_history
+from trading import consistency
+from trading import redis_io as K
 
-LIVE_REDIS_URL = os.getenv("LIVE_REDIS_URL", os.getenv("REDIS_URL", "redis://localhost:6379/0"))
-TEST_REDIS_URL = os.getenv("TEST_REDIS_URL", "redis://localhost:6379/1")
+log = logging.getLogger("dashboard")
+if not log.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s dashboard: %(message)s"))
+    log.addHandler(_h)
+    log.setLevel(logging.INFO)
+
 HTML_PATH = os.path.join(os.path.dirname(__file__), "dashboard.html")
+MODES = ("live", "test")
 
 QUICK_HISTORY_COUNT = 50000
 HIST_FETCH_CAP = 50000
@@ -37,78 +55,51 @@ XREAD_COUNT = 500
 DEFAULT_WINDOW = "10m"
 WINDOWS = {"2m", "10m", "30m", "1h", "4h", "1d", "3d"}
 TRADES_INFIX = ":data.trades."
-COMMAND_STREAM = "dashboard:commands"
-STRATEGY_CMDS_STREAM = "dashboard:strategy_cmds"
-STRATEGY_STATES_KEY = "dashboard:strategy_states"
-INDICATORS_PREFIX = "dashboard:indicators:"
-ORDER_EVENTS_KEY = "dashboard:order_events"
-STRATEGY_ACTIONS = {"start_strategy", "stop_strategy", "close_strategy",
-                    "export_csv", "start_test_strategy"}
 BARS_INFIX = ":data.bars."
 HIST_BARS_INFIX = ":historical.data.bars."
 HIST_TRADES_INFIX = ":historical.data.trades."
+NODE_STALE_S = 10               # refuse strategy commands when the heartbeat is older
 
-TIMEFRAMES = {
-    "1s": "1-SECOND", "5s": "5-SECOND", "15s": "15-SECOND",
-    "1m": "1-MINUTE", "5m": "5-MINUTE", "15m": "15-MINUTE", "1h": "1-HOUR",
-}
-TF_SOURCE = {
-    "1s": "INTERNAL", "5s": "INTERNAL", "15s": "INTERNAL",
-    "1m": "EXTERNAL", "5m": "EXTERNAL", "15m": "EXTERNAL", "1h": "EXTERNAL",
-}
+STRATEGY_ACTIONS = {"start_strategy", "stop_strategy", "close_strategy", "export_csv",
+                    "start_test_strategy", "rewarm"}
+DATA_ACTIONS = {"subscribe", "unsubscribe", "backfill"}
+
+TIMEFRAMES = {"1s": "1-SECOND", "5s": "5-SECOND", "15s": "15-SECOND",
+              "1m": "1-MINUTE", "5m": "5-MINUTE", "15m": "15-MINUTE", "1h": "1-HOUR"}
+TF_SOURCE = {"1s": "INTERNAL", "5s": "INTERNAL", "15s": "INTERNAL",
+             "1m": "EXTERNAL", "5m": "EXTERNAL", "15m": "EXTERNAL", "1h": "EXTERNAL"}
 
 app = FastAPI()
 
-# ── Redis connections ────────────────────────────────────────────────────────
-# Market data: always from the live node (shared feed for both UI modes).
-r = aioredis.from_url(
-    LIVE_REDIS_URL, decode_responses=True,
-    socket_timeout=None, socket_keepalive=True, max_connections=300,
-)
+# Market data always comes from the live node (DB 0); state is per mode.
+r = aioredis.from_url(K.live_url(), decode_responses=True, socket_keepalive=True,
+                      socket_connect_timeout=3, max_connections=300)
+r_state = {"live": r, "test": aioredis.from_url(K.test_url(), decode_responses=True,
+                                                socket_connect_timeout=3, max_connections=50)}
+r_sync = {"live": K.connect(K.live_url()), "test": K.connect(K.test_url())}
 
-# State Redis (portfolio / positions / strategy): one per UI mode.
-_MODE_URLS = {"live": LIVE_REDIS_URL, "test": TEST_REDIS_URL}
-
-r_state: dict[str, aioredis.Redis] = {
-    m: aioredis.from_url(url, decode_responses=True,
-                         socket_timeout=None, socket_keepalive=True, max_connections=100)
-    for m, url in _MODE_URLS.items()
-}
-
-# Sync variants for thread-pool work (backtest serving + portfolio dedup).
-r_sync: dict[str, syncredis.Redis] = {
-    m: syncredis.from_url(url, decode_responses=True)
-    for m, url in _MODE_URLS.items()
-}
-
-_BT_EXEC = ThreadPoolExecutor(max_workers=4, thread_name_prefix="backtest")
+_BT_EXEC = ThreadPoolExecutor(max_workers=4, thread_name_prefix="history")
 _PF_EXEC = ThreadPoolExecutor(max_workers=2, thread_name_prefix="portfolio")
 
 
-# ── helpers ─────────────────────────────────────────────────────────────────
+# ── helpers ──────────────────────────────────────────────────────────────────
 def symbol_from_trade_key(key: str) -> str | None:
     i = key.find(TRADES_INFIX)
     if i < 0:
         return None
-    suffix = key[i + len(TRADES_INFIX):]
-    venue, _, sym = suffix.partition(".")
+    venue, _, sym = key[i + len(TRADES_INFIX):].partition(".")
     return f"{sym}.{venue}" if sym else None
 
 
-async def find_trade_key(symbol: str) -> str | None:
-    sym, _, venue = symbol.rpartition(".")
-    pattern = f"*{TRADES_INFIX}{venue}.{sym}"
+async def _first_key(pattern: str) -> str | None:
     async for key in r.scan_iter(match=pattern, count=1000):
         return key
     return None
 
 
-async def find_hist_trade_key(symbol: str) -> str | None:
+def _trade_pattern(symbol: str, infix: str) -> str:
     sym, _, venue = symbol.rpartition(".")
-    pattern = f"*{HIST_TRADES_INFIX}{venue}.{sym}"
-    async for key in r.scan_iter(match=pattern, count=1000):
-        return key
-    return None
+    return f"*{infix}{venue}.{sym}"
 
 
 def _to_epoch_seconds(ts) -> float:
@@ -117,18 +108,8 @@ def _to_epoch_seconds(ts) -> float:
     s = str(ts)
     if s.isdigit():
         return int(s) / 1e9
-    s = s.replace("Z", "+00:00")
-    s = re.sub(r"(\.\d{6})\d+", r"\1", s)
+    s = re.sub(r"(\.\d{6})\d+", r"\1", s.replace("Z", "+00:00"))
     return datetime.fromisoformat(s).timestamp()
-
-
-def _tick_from_payload(raw: str) -> dict | None:
-    try:
-        d = json.loads(raw)
-        return {"t": _to_epoch_seconds(d["ts_event"]), "price": float(d["price"]),
-                "qty": float(d.get("size", 0) or 0)}
-    except (KeyError, ValueError, TypeError, json.JSONDecodeError):
-        return None
 
 
 def _payload_value(fields: dict) -> str | None:
@@ -137,655 +118,606 @@ def _payload_value(fields: dict) -> str | None:
     return fields.get("payload") or next(iter(fields.values()))
 
 
-def bar_type_for(symbol: str, timeframe: str) -> str | None:
-    spec = TIMEFRAMES.get(timeframe)
-    src = TF_SOURCE.get(timeframe, "EXTERNAL")
-    return f"{symbol}-{spec}-LAST-{src}" if spec else None
-
-
-async def find_bar_key(bar_type: str) -> str | None:
-    async for key in r.scan_iter(match=f"*{BARS_INFIX}{bar_type}", count=1000):
-        return key
-    return None
-
-
-async def find_hist_bar_key(bar_type: str) -> str | None:
-    async for key in r.scan_iter(match=f"*{HIST_BARS_INFIX}{bar_type}", count=1000):
-        return key
-    return None
-
-
-def _bar_from_payload(raw: str) -> dict | None:
+def _tick(fields: dict) -> dict | None:
     try:
-        d = json.loads(raw)
-        return {"t": _to_epoch_seconds(d["ts_event"]),
-                "o": float(d["open"]), "h": float(d["high"]),
-                "l": float(d["low"]), "c": float(d["close"]),
-                "v": float(d.get("volume", 0) or 0)}
-    except (KeyError, ValueError, TypeError, json.JSONDecodeError):
-        return None
-
-
-# ── client state ─────────────────────────────────────────────────────────────
-# Market data state (shared — market data is always from the live node).
-clients: dict[WebSocket, str] = {}          # ws -> mode
-symbol_clients: dict[str, set[WebSocket]] = defaultdict(set)
-tail_tasks: dict[str, asyncio.Task] = {}
-hist_tail_tasks: dict[str, asyncio.Task] = {}
-bar_clients: dict[str, set[WebSocket]] = defaultdict(set)
-bar_tail_tasks: dict[str, asyncio.Task] = {}
-hist_bar_tail_tasks: dict[str, asyncio.Task] = {}
-client_bars: dict[WebSocket, set[str]] = defaultdict(set)
-ind_clients: dict[str, set[WebSocket]] = defaultdict(set)
-ind_tail_tasks: dict[str, asyncio.Task] = {}
-_pkt_counts: dict[str, int] = defaultdict(int)
-packet_clients: set[WebSocket] = set()
-
-# Mode-segregated client sets (for portfolio / order event broadcasts).
-mode_clients: dict[str, set[WebSocket]] = {"live": set(), "test": set()}
-
-
-# ── send helpers ─────────────────────────────────────────────────────────────
-async def _safe_send(ws: WebSocket, payload: dict) -> None:
-    try:
-        await ws.send_text(json.dumps(payload))
-    except Exception:
-        pass
-
-
-async def _safe_send_text(ws: WebSocket, text: str) -> None:
-    try:
-        await ws.send_text(text)
-    except Exception:
-        pass
-
-
-async def _send_command(cmd: dict) -> None:
-    await r.xadd(COMMAND_STREAM, {"json": json.dumps(cmd)}, maxlen=1000, approximate=True)
-
-
-async def _send_strategy_command(cmd: dict, mode: str = "live") -> None:
-    fields = {k: str(v) for k, v in cmd.items()}
-    # Strategy commands always go to DB 0 — that's where binance_data.py listens.
-    # The mode is passed as a field so the node knows which Redis to write results to.
-    fields["mode"] = mode
-    await r_state["live"].xadd(STRATEGY_CMDS_STREAM, fields, maxlen=100, approximate=True)
-
-
-# ── market-data tails (shared, always live Redis) ────────────────────────────
-async def _tail_symbol(symbol: str) -> None:
-    key = None
-    for _ in range(40):
-        if not symbol_clients.get(symbol):
-            return
-        key = await find_trade_key(symbol)
-        if key:
-            break
-        await asyncio.sleep(0.5)
-    if key is None:
-        return
-    cursor = "$"
-    try:
-        while symbol_clients.get(symbol):
-            try:
-                results = await r.xread({key: cursor}, count=XREAD_COUNT, block=XREAD_BLOCK_MS)
-            except RedisError:
-                await asyncio.sleep(0.5)
-                continue
-            if not results:
-                continue
-            _, entries = results[0]
-            if not entries:
-                continue
-            cursor = entries[-1][0]
-            points = []
-            for _id, fields in entries:
-                pv = _payload_value(fields)
-                pt = _tick_from_payload(pv) if pv else None
-                if pt:
-                    points.append(pt)
-            if not points:
-                continue
-            _pkt_counts[symbol] += len(points)
-            frame = {"type": "ticks", "symbol": symbol, "points": points}
-            for ws in list(symbol_clients.get(symbol, ())):
-                await _safe_send(ws, frame)
-    except asyncio.CancelledError:
-        pass
-    finally:
-        tail_tasks.pop(symbol, None)
-
-
-def _ensure_tail(symbol: str) -> None:
-    if symbol not in tail_tasks or tail_tasks[symbol].done():
-        tail_tasks[symbol] = asyncio.create_task(_tail_symbol(symbol))
-
-
-async def _tail_hist_symbol(symbol: str) -> None:
-    sym, _, venue = symbol.rpartition(".")
-    pattern = f"*{HIST_TRADES_INFIX}{venue}.{sym}"
-    key = None
-    cursor = "$"
-    try:
-        while symbol_clients.get(symbol):
-            if key is None:
-                async for k in r.scan_iter(match=pattern, count=1000):
-                    key = k
-                    break
-                if key is None:
-                    await asyncio.sleep(2.0)
-                    continue
-            try:
-                results = await r.xread({key: cursor}, count=XREAD_COUNT, block=XREAD_BLOCK_MS)
-            except RedisError:
-                await asyncio.sleep(0.5)
-                continue
-            if not results:
-                continue
-            _, entries = results[0]
-            if not entries:
-                continue
-            cursor = entries[-1][0]
-            points = []
-            for _id, fields in entries:
-                pv = _payload_value(fields)
-                pt = _tick_from_payload(pv) if pv else None
-                if pt:
-                    points.append(pt)
-            if not points:
-                continue
-            frame = {"type": "hist_ticks", "symbol": symbol, "points": points}
-            for ws in list(symbol_clients.get(symbol, ())):
-                await _safe_send(ws, frame)
-    except asyncio.CancelledError:
-        pass
-    finally:
-        hist_tail_tasks.pop(symbol, None)
-
-
-def _ensure_hist_tail(symbol: str) -> None:
-    if symbol not in hist_tail_tasks or hist_tail_tasks[symbol].done():
-        hist_tail_tasks[symbol] = asyncio.create_task(_tail_hist_symbol(symbol))
-
-
-async def _send_history(ws: WebSocket, symbol: str, window: str) -> None:
-    seen: set = set()
-    ticks: list[dict] = []
-    for finder, cap in ((find_hist_trade_key, HIST_FETCH_CAP), (find_trade_key, QUICK_HISTORY_COUNT)):
-        key = await finder(symbol)
-        if key is None:
-            continue
-        try:
-            entries = await r.xrevrange(key, "+", "-", count=cap)
-        except Exception:
-            entries = []
-        for _id, fields in entries:
-            pv = _payload_value(fields)
-            pt = _tick_from_payload(pv) if pv else None
-            if pt:
-                k = (pt["t"], pt["price"], pt["qty"])
-                if k not in seen:
-                    seen.add(k)
-                    ticks.append(pt)
-    ticks.sort(key=lambda d: d["t"])
-    await _safe_send(ws, {"type": "history", "symbol": symbol, "ticks": ticks,
-                          "complete": True, "window": window})
-
-
-async def _tail_bars(symbol: str, bar_type: str) -> None:
-    key = None
-    cursor = "$"
-    try:
-        while bar_clients.get(bar_type):
-            if key is None:
-                key = await find_bar_key(bar_type)
-                if key is None:
-                    await asyncio.sleep(2.0)
-                    continue
-                recent = await r.xrevrange(key, count=2)
-                cursor = recent[1][0] if len(recent) > 1 else "0-0"
-            try:
-                results = await r.xread({key: cursor}, count=XREAD_COUNT, block=XREAD_BLOCK_MS)
-            except RedisError:
-                await asyncio.sleep(0.5)
-                continue
-            if not results:
-                continue
-            _, entries = results[0]
-            if not entries:
-                continue
-            cursor = entries[-1][0]
-            points = []
-            for _id, fields in entries:
-                pv = _payload_value(fields)
-                bar = _bar_from_payload(pv) if pv else None
-                if bar:
-                    points.append(bar)
-            if not points:
-                continue
-            frame = {"type": "bars", "symbol": symbol, "bar_type": bar_type, "points": points}
-            for ws in list(bar_clients.get(bar_type, ())):
-                await _safe_send(ws, frame)
-    except asyncio.CancelledError:
-        pass
-    finally:
-        bar_tail_tasks.pop(bar_type, None)
-
-
-async def _tail_hist_bars(symbol: str, bar_type: str) -> None:
-    key = None
-    cursor = "0-0"
-    try:
-        while bar_clients.get(bar_type):
-            if key is None:
-                key = await find_hist_bar_key(bar_type)
-                if key is None:
-                    await asyncio.sleep(2.0)
-                    continue
-            try:
-                results = await r.xread({key: cursor}, count=XREAD_COUNT, block=XREAD_BLOCK_MS)
-            except RedisError:
-                await asyncio.sleep(0.5)
-                continue
-            if not results:
-                continue
-            _, entries = results[0]
-            if not entries:
-                continue
-            cursor = entries[-1][0]
-            points = []
-            for _id, fields in entries:
-                pv = _payload_value(fields)
-                bar = _bar_from_payload(pv) if pv else None
-                if bar:
-                    points.append(bar)
-            if not points:
-                continue
-            frame = {"type": "bars", "symbol": symbol, "bar_type": bar_type, "points": points}
-            for ws in list(bar_clients.get(bar_type, ())):
-                await _safe_send(ws, frame)
-    except asyncio.CancelledError:
-        pass
-    finally:
-        hist_bar_tail_tasks.pop(bar_type, None)
-
-
-def _ensure_bar_tail(symbol: str, bar_type: str) -> None:
-    if bar_type not in bar_tail_tasks or bar_tail_tasks[bar_type].done():
-        bar_tail_tasks[bar_type] = asyncio.create_task(_tail_bars(symbol, bar_type))
-    if bar_type not in hist_bar_tail_tasks or hist_bar_tail_tasks[bar_type].done():
-        hist_bar_tail_tasks[bar_type] = asyncio.create_task(_tail_hist_bars(symbol, bar_type))
-
-
-async def _send_bar_history(ws: WebSocket, symbol: str, bar_type: str) -> None:
-    by_t: dict[float, dict] = {}
-    for finder in (find_hist_bar_key, find_bar_key):
-        key = await finder(bar_type)
-        if key is None:
-            continue
-        try:
-            entries = await r.xrevrange(key, "+", "-", count=HIST_FETCH_CAP)
-        except Exception:
-            entries = []
-        seen: set = set()
-        for _id, fields in entries:
-            pv = _payload_value(fields)
-            bar = _bar_from_payload(pv) if pv else None
-            if not bar or bar["t"] in seen:
-                continue
-            seen.add(bar["t"])
-            by_t[bar["t"]] = bar
-    # In test mode, also merge backtest chart bars stored by the backtest runner.
-    # These are stored as JSON arrays under test:chart:{bar_type} in the test Redis.
-    ws_m = clients.get(ws, "live")
-    if ws_m == "test":
-        try:
-            raw = r_sync["test"].get(f"test:chart:{bar_type}")
-            if raw:
-                for bar in json.loads(raw):
-                    t = bar.get("t")
-                    if t and t not in by_t:   # live bars take precedence for same timestamp
-                        by_t[t] = bar
-        except Exception:
-            pass
-    bars = [by_t[t] for t in sorted(by_t)]
-    await _safe_send(ws, {"type": "bar_history", "symbol": symbol, "bar_type": bar_type, "bars": bars})
-
-
-def _drop_bars_for_symbol(ws: WebSocket, symbol: str) -> None:
-    prefix = f"{symbol}-"
-    for bt in [b for b in client_bars.get(ws, set()) if b.startswith(prefix)]:
-        client_bars[ws].discard(bt)
-        bar_clients.get(bt, set()).discard(ws)
-
-
-def _ind_fields_to_point(fields: dict) -> dict | None:
-    try:
-        ts = int(fields["ts"])
-        tf = fields["tf"]
-        snap = {k: float(v) for k, v in fields.items() if k not in ("ts", "tf")}
-        return {"ts": ts, "tf": tf, **snap}
+        d = json.loads(_payload_value(fields))
+        return {"t": _to_epoch_seconds(d["ts_event"]), "price": float(d["price"]),
+                "qty": float(d.get("size", 0) or 0)}
     except (KeyError, ValueError, TypeError):
         return None
 
 
-async def _send_indicator_history(ws: WebSocket, symbol: str) -> None:
-    key = f"{INDICATORS_PREFIX}{symbol}"
+def _bar(fields: dict) -> dict | None:
     try:
-        entries = await r.xrange(key, "-", "+", count=HIST_FETCH_CAP)
+        d = json.loads(_payload_value(fields))
+        # ms-rounded so Redis and Postgres bars share one key (float ns -> s
+        # otherwise gives ...59.9990001 vs ...59.999 and duplicates candles)
+        return {"t": round(_to_epoch_seconds(d["ts_event"]), 3), "o": float(d["open"]),
+                "h": float(d["high"]), "l": float(d["low"]), "c": float(d["close"]),
+                "v": float(d.get("volume", 0) or 0)}
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def _indicator(fields: dict) -> dict | None:
+    try:
+        return {"ts": int(fields["ts"]), "tf": fields["tf"],
+                **{k: float(v) for k, v in fields.items() if k not in ("ts", "tf")}}
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def bar_type_for(symbol: str, timeframe: str) -> str | None:
+    spec = TIMEFRAMES.get(timeframe)
+    return f"{symbol}-{spec}-LAST-{TF_SOURCE[timeframe]}" if spec else None
+
+
+def _tf_of(symbol: str, bar_type: str) -> str | None:
+    return next((tf for tf in TIMEFRAMES if bar_type_for(symbol, tf) == bar_type), None)
+
+
+# ── client state ─────────────────────────────────────────────────────────────
+clients: dict[WebSocket, str] = {}                        # ws -> mode
+mode_clients: dict[str, set[WebSocket]] = {"live": set(), "test": set()}
+tick_clients: dict[str, set[WebSocket]] = defaultdict(set)   # symbol -> ws
+bar_clients: dict[str, set[WebSocket]] = defaultdict(set)    # bar_type -> ws
+ind_clients: dict[str, set[WebSocket]] = defaultdict(set)    # symbol -> ws
+client_bars: dict[WebSocket, set[str]] = defaultdict(set)
+tails: dict[str, asyncio.Task] = {}                        # tail name -> task
+packet_clients: set[WebSocket] = set()
+_pkt_counts: dict[str, int] = defaultdict(int)
+
+
+async def _safe_send(ws: WebSocket, payload) -> None:
+    try:
+        await ws.send_text(payload if isinstance(payload, str) else json.dumps(payload))
     except Exception:
+        pass            # socket closing; its handler cleans up
+
+
+async def _broadcast(targets, payload) -> None:
+    text = payload if isinstance(payload, str) else json.dumps(payload)
+    for ws in list(targets):
+        await _safe_send(ws, text)
+
+
+# ── stream tails ───────────────────────────────────────────────────────────────
+async def _tail(name: str, pattern: str | None, key: str | None, subscribers, parse, frame,
+                start: str = "$", backlog: int = 0) -> None:
+    """Forward new entries of one Redis stream to its subscribers until none are
+    left. Waits (polling) for the stream to exist: an instrument's first trade
+    can take minutes. One implementation for ticks, bars and indicators."""
+    try:
+        while subscribers() and key is None:
+            key = await _first_key(pattern)
+            if key is None:
+                await asyncio.sleep(1.0)
+        if key is None:
+            return
+        cursor = start
+        if backlog:
+            recent = await r.xrevrange(key, count=backlog)
+            cursor = recent[-1][0] if len(recent) == backlog else "0-0"
+        while subscribers():
+            try:
+                res = await r.xread({key: cursor}, count=XREAD_COUNT, block=XREAD_BLOCK_MS)
+            except RedisError as e:
+                log.warning(f"tail {name}: {e}")
+                await asyncio.sleep(1.0)
+                continue
+            if not res or not res[0][1]:
+                continue
+            cursor = res[0][1][-1][0]
+            points = [p for _id, f in res[0][1] if (p := parse(f))]
+            if points:
+                await _broadcast(subscribers(), frame(points))
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        log.exception(f"tail {name} crashed")
+    finally:
+        tails.pop(name, None)
+
+
+def _ensure(name: str, coro_factory) -> None:
+    t = tails.get(name)
+    if t is None or t.done():
+        tails[name] = asyncio.create_task(coro_factory())
+
+
+def _ensure_symbol_tails(sym: str) -> None:
+    subs = lambda: tick_clients.get(sym)  # noqa: E731
+
+    def live_frame(points):
+        _pkt_counts[sym] += len(points)
+        return {"type": "ticks", "symbol": sym, "points": points}
+    _ensure(f"ticks:{sym}", lambda: _tail(f"ticks:{sym}", _trade_pattern(sym, TRADES_INFIX), None, subs,
+                                          _tick, live_frame))
+    _ensure(f"hticks:{sym}", lambda: _tail(f"hticks:{sym}", _trade_pattern(sym, HIST_TRADES_INFIX), None,
+                                           subs, _tick,
+                                           lambda p: {"type": "hist_ticks", "symbol": sym, "points": p}))
+    _ensure(f"ind:{sym}", lambda: _tail(f"ind:{sym}", None, f"{K.INDICATORS}{sym}", lambda: ind_clients.get(sym),
+                                        _indicator, lambda p: {"type": "indicators", "symbol": sym, "points": p},
+                                        start="0-0"))
+
+
+def _ensure_bar_tails(sym: str, bt: str) -> None:
+    subs = lambda: bar_clients.get(bt)  # noqa: E731
+    frame = lambda p: {"type": "bars", "symbol": sym, "bar_type": bt, "points": p}  # noqa: E731
+    _ensure(f"bars:{bt}", lambda: _tail(f"bars:{bt}", f"*{BARS_INFIX}{bt}", None, subs, _bar, frame, backlog=2))
+    _ensure(f"hbars:{bt}", lambda: _tail(f"hbars:{bt}", f"*{HIST_BARS_INFIX}{bt}", None, subs, _bar, frame,
+                                         start="0-0"))
+
+
+# ── history on subscribe ──────────────────────────────────────────────────────
+async def _send_history(ws: WebSocket, symbol: str, window: str) -> None:
+    seen, ticks = set(), []
+    for infix, cap in ((HIST_TRADES_INFIX, HIST_FETCH_CAP), (TRADES_INFIX, QUICK_HISTORY_COUNT)):
+        key = await _first_key(_trade_pattern(symbol, infix))
+        if key is None:
+            continue
+        for _id, fields in await r.xrevrange(key, "+", "-", count=cap):
+            pt = _tick(fields)
+            if pt and (k := (pt["t"], pt["price"], pt["qty"])) not in seen:
+                seen.add(k)
+                ticks.append(pt)
+    ticks.sort(key=lambda d: d["t"])
+    await _safe_send(ws, {"type": "history", "symbol": symbol, "ticks": ticks, "complete": True, "window": window})
+
+
+_catchup_at: dict[str, float] = {}
+CATCHUP_COOLDOWN_S = 600
+CATCHUP_MAX_HOLES = 3
+
+
+async def _catch_up(bar_type: str, tf: str, bars: list[dict], pg_last: float | None) -> None:
+    """Ask the node to backfill the holes between the last Postgres bar and now
+    (normally one: last sync -> first live bar). Older holes are left to the
+    backtester's Data tab."""
+    if pg_last is None or time.monotonic() - _catchup_at.get(bar_type, -1e9) < CATCHUP_COOLDOWN_S:
         return
-    points = [p for (_id, f) in entries if (p := _ind_fields_to_point(f))]
+    step, now = pg_history.TF_SECONDS[tf], time.time()
+    holes, prev = [], pg_last
+    for t in (b["t"] for b in bars if pg_last - step <= b["t"] <= now):
+        if t - prev > 1.5 * step:
+            holes.append((prev, t))
+        prev = max(prev, t)
+    if now - prev > 2 * step:
+        holes.append((prev, None))
+    if not holes:
+        return
+    _catchup_at[bar_type] = time.monotonic()
+    for start, end in holes[:CATCHUP_MAX_HOLES]:
+        await _data_command({"action": "backfill", "bar_type": bar_type, "start": start,
+                             **({"end": end} if end is not None else {})})
+
+
+async def _send_bar_history(ws: WebSocket, symbol: str, bar_type: str) -> None:
+    by_t: dict[float, dict] = {}
+    for infix in (HIST_BARS_INFIX, BARS_INFIX):
+        key = await _first_key(f"*{infix}{bar_type}")
+        if key is None:
+            continue
+        for _id, fields in await r.xrevrange(key, "+", "-", count=HIST_FETCH_CAP):
+            if (bar := _bar(fields)) and bar["t"] not in by_t:
+                by_t[bar["t"]] = bar
+    if clients.get(ws) == "test":
+        # backtest chart bars (live bars win on the same timestamp)
+        for bar in K.read_json(r_sync["test"], f"{K.TEST_CHART}{bar_type}", []) or []:
+            if bar.get("t") is not None:
+                by_t.setdefault(round(bar["t"], 3), bar)
+    tf = _tf_of(symbol, bar_type)
+    pg_last = None
+    if tf in pg_history.TF_SECONDS:
+        pg = await asyncio.get_running_loop().run_in_executor(_BT_EXEC, pg_history.load_bars, symbol, tf)
+        now = time.time()
+        for bar in pg:
+            by_t.setdefault(bar["t"], bar)
+            if bar["t"] <= now:            # skip the still-forming aggregate bucket
+                pg_last = bar["t"]
+    bars = [by_t[t] for t in sorted(by_t)]
+    await _safe_send(ws, {"type": "bar_history", "symbol": symbol, "bar_type": bar_type, "bars": bars})
+    if tf in pg_history.TF_SECONDS:
+        await _catch_up(bar_type, tf, bars, pg_last)
+
+
+async def _send_indicator_history(ws: WebSocket, symbol: str) -> None:
+    entries = await r.xrange(f"{K.INDICATORS}{symbol}", "-", "+", count=HIST_FETCH_CAP)
+    points = [p for _id, f in entries if (p := _indicator(f))]
     if points:
         await _safe_send(ws, {"type": "indicator_history", "symbol": symbol, "points": points})
 
 
-async def _tail_indicators(symbol: str) -> None:
-    key = f"{INDICATORS_PREFIX}{symbol}"
-    cursor = "0-0"
-    try:
-        while ind_clients.get(symbol):
-            try:
-                results = await r.xread({key: cursor}, count=XREAD_COUNT, block=XREAD_BLOCK_MS)
-            except RedisError:
-                await asyncio.sleep(0.5)
-                continue
-            if not results:
-                continue
-            _, entries = results[0]
-            if not entries:
-                continue
-            cursor = entries[-1][0]
-            points = [p for (_id, f) in entries if (p := _ind_fields_to_point(f))]
-            if not points:
-                continue
-            frame = {"type": "indicators", "symbol": symbol, "points": points}
-            for ws in list(ind_clients.get(symbol, ())):
-                await _safe_send(ws, frame)
-    except asyncio.CancelledError:
-        pass
-    finally:
-        ind_tail_tasks.pop(symbol, None)
+# ── portfolio frames ──────────────────────────────────────────────────────────
+class _LedgerCache:
+    rev = None
+    records: list = []
 
 
-def _ensure_indicator_tail(symbol: str) -> None:
-    if symbol not in ind_tail_tasks or ind_tail_tasks[symbol].done():
-        ind_tail_tasks[symbol] = asyncio.create_task(_tail_indicators(symbol))
+_ledger_cache = _LedgerCache()
 
 
-# ── packet rate loop ─────────────────────────────────────────────────────────
-async def _packet_loop() -> None:
-    while True:
-        await asyncio.sleep(1.0)
-        if not packet_clients:
-            _pkt_counts.clear()
-            continue
-        rates = dict(_pkt_counts)
-        _pkt_counts.clear()
-        frame = {"type": "packets", "t": time.time(),
-                 "total": sum(rates.values()), "rates": rates}
-        for ws in list(packet_clients):
-            await _safe_send(ws, frame)
+def _ledger(rev) -> list:
+    """Closed-position ledger, re-read only when the node's revision changes."""
+    if rev != _ledger_cache.rev:
+        led = K.read_json(r_sync["live"], K.CLOSED_POSITIONS, {}) or {}
+        _ledger_cache.records = sorted(led.values(), key=lambda c: c.get("ts_closed", 0), reverse=True)
+        _ledger_cache.rev = rev
+    return _ledger_cache.records
 
 
-# ── portfolio loops (one per mode) ───────────────────────────────────────────
-def _build_portfolio_sync(mode: str, last_sig):
-    # Portfolio always lives in DB 0 (live node). Filter by strategy mode.
+def build_portfolio(mode: str) -> dict | None:
     rc = r_sync["live"]
-    raw = rc.get("dashboard:portfolio")
-    if not raw:
-        return (None, None)
-    try:
-        states = rc.hgetall(STRATEGY_STATES_KEY)
-    except Exception:
-        states = {}
-    try:
-        mode_map = rc.hgetall("dashboard:strategy_modes")  # sid -> "live"|"test"
-    except Exception:
-        mode_map = {}
-    sig = (raw, tuple(sorted(states.items())), tuple(sorted(mode_map.items())))
-    if sig == last_sig:
-        return (sig, None)
-    try:
-        snap = json.loads(raw)
-    except Exception:
-        return (sig, None)
-
-    all_strats = snap.get("strategies", [])
-
-    # Strategy list: always show ALL strategies in both tabs so users can
-    # select and start them regardless of which mode they're currently in.
-    # Positions/PnL are filtered to only show this mode's trades.
-    pos_strats = {sid for sid, m in mode_map.items() if m == mode}
-    untagged   = {sid for sid in all_strats if sid not in mode_map}
-    if mode == "live":
-        pos_visible = pos_strats | untagged   # live + untagged for positions
-    else:
-        pos_visible = pos_strats              # only tagged-test positions
-
-    positions = [p for p in snap.get("positions", []) if p.get("strategy") in pos_visible]
-    closed    = [p for p in snap.get("closed_positions", []) if p.get("strategy") in pos_visible]
-
-    # Recompute PnL from filtered positions only.
-    pnl: dict = {}
-    for p in positions:
-        d = pnl.setdefault(p.get("ccy") or "USDT", {"realized": 0.0, "unrealized": 0.0})
-        d["realized"]   += p.get("realized", 0.0)
-        d["unrealized"] += p.get("unrealized", 0.0)
-    for p in closed:
-        d = pnl.setdefault(p.get("ccy") or "USDT", {"realized": 0.0, "unrealized": 0.0})
-        d["realized"] += p.get("realized", 0.0)
-    for v in pnl.values():
-        v["total"] = v["realized"] + v["unrealized"]
-
-    metrics = {}
-    for sid in all_strats:
-        try:
-            mraw = rc.get(f"dashboard:metrics:{sid}")
-            if mraw:
-                metrics[sid] = json.loads(mraw)
-        except Exception:
-            pass
-
-    merged = {"positions": positions, "closed_positions": closed, "pnl": pnl}
+    snap = K.read_json(rc, K.PORTFOLIO)
+    if not snap:
+        return None
+    modes = rc.hgetall(K.STRATEGY_MODES) or {}
+    status = K.read_json(rc, K.STRATEGY_STATUS, {}) or {}
+    strategies = sorted(snap.get("strategies", []))
+    mine = lambda sid: modes.get(sid, "live") == mode  # noqa: E731  (untagged count as live)
+    positions = [p for p in snap.get("positions", []) if mine(p.get("strategy"))]
+    closed = [c for c in _ledger(snap.get("closed_rev")) if mine(c.get("strategy"))]
+    session_closed = [c for c in closed if c.get("session") == snap.get("session")]
     if mode == "test":
-        merged = _merge_backtest_into_snap(merged)
-
-    frame = {
-        "type": "portfolio",
-        **snap,
-        "strategies": sorted(all_strats),
-        "positions": merged["positions"],
-        "closed_positions": merged["closed_positions"],
-        "pnl": merged["pnl"],
-        "metrics": metrics,
-        "strategy_states": states,
+        bt = K.read_json(r_sync["test"], f"{K.BACKTEST}:positions", {}) or {}
+        have = {c.get("id") for c in closed}
+        extra = [{**c, "session": "backtest"} for c in bt.get("closed_positions", []) if c.get("id") not in have]
+        closed = sorted(closed + extra, key=lambda c: c.get("ts_closed", 0), reverse=True)
+        session_closed += extra        # a test run = backtest + its live hand-off
+    keys = [f"{K.METRICS}{sid}" for sid in strategies]
+    metrics = {}
+    for sid, raw in zip(strategies, rc.mget(keys) if keys else []):
+        try:
+            metrics[sid] = json.loads(raw) if raw else {}
+        except ValueError:
+            metrics[sid] = {}
+    hb = K.read_json(rc, K.HEARTBEAT) or {}
+    overall = {ccy: v["realized"] for ccy, v in consistency.pnl_from(positions, closed).items()}
+    return {
+        "type": "portfolio", "ts": snap.get("ts"), "session": snap.get("session"),
+        "strategies": strategies,
+        "strategy_status": status,
+        "strategy_states": {sid: "RUNNING" if status.get(sid, {}).get("armed") else "STOPPED" for sid in strategies},
+        "strategy_modes": modes,
+        "positions": positions, "closed_positions": closed,
+        "pnl": consistency.pnl_from(positions, session_closed),
+        "overall_pnl": overall,
+        "prices": snap.get("prices", {}), "metrics": metrics,
+        "node": {"age": round(time.time() - hb["ts"] / 1000, 1) if hb.get("ts") else None,
+                 "session": hb.get("session"), "held_writes": hb.get("held_writes", 0)},
     }
-    return (sig, json.dumps(frame))
 
 
 async def _portfolio_loop(mode: str) -> None:
-    last_sig = None
     loop = asyncio.get_running_loop()
+    last_ts, failures = None, 0
     while True:
-        await asyncio.sleep(0.25)
-        ws_set = mode_clients.get(mode, set())
-        if not ws_set:
+        await asyncio.sleep(0.5)
+        if not mode_clients[mode]:
             continue
         try:
-            sig, text = await loop.run_in_executor(
-                _PF_EXEC, _build_portfolio_sync, mode, last_sig)
-        except Exception:
+            frame = await loop.run_in_executor(_PF_EXEC, build_portfolio, mode)
+            failures = 0
+        except Exception as e:
+            failures += 1
+            if failures == 1:
+                log.warning(f"portfolio ({mode}) failed: {e}")
             continue
-        last_sig = sig
-        if text is None:
+        if frame is None or frame["ts"] == last_ts:
             continue
-        for ws in list(ws_set):
-            await _safe_send_text(ws, text)
+        last_ts = frame["ts"]
+        await _broadcast(mode_clients[mode], frame)
 
 
-# ── order events tail (single stream, routed per mode) ───────────────────────
-def _event_mode(strategy: str, mode_map: dict) -> str:
-    # All strategies (live and test) run in the live node and write order events
-    # to DB 0, tagged by strategy. Route each to its mode; untagged → live,
-    # matching the portfolio filter (_build_portfolio_sync).
-    return mode_map.get(strategy, "live")
+# ── order events + notifications ───────────────────────────────────────────────
+def _order_frame(fields: dict) -> dict:
+    return {"type": "order_event", **fields, "ts": float(fields.get("ts") or 0)}
+
+
+def _notification_frame(nid: str, fields: dict) -> dict:
+    try:
+        retry = json.loads(fields["retry"]) if fields.get("retry") else None
+    except ValueError:
+        retry = None
+    return {"type": "notification", "id": nid, **fields, "ts": float(fields.get("ts") or 0), "retry": retry}
 
 
 async def _tail_order_events() -> None:
-    rc = r_state["live"]   # all order events live in DB 0, tagged by strategy
     cursor = "$"
     while True:
         try:
-            results = await rc.xread({ORDER_EVENTS_KEY: cursor}, count=100, block=1000)
-            if not results:
+            res = await r.xread({K.ORDER_EVENTS: cursor}, count=200, block=1000)
+            if not res:
                 continue
-            _, entries = results[0]
-            if not entries:
-                continue
-            cursor = entries[-1][0]
-            try:
-                mode_map = await rc.hgetall("dashboard:strategy_modes")
-            except Exception:
-                mode_map = {}
-            for _id, fields in entries:
-                ev_mode = _event_mode(fields.get("strategy", ""), mode_map)
-                frame = {
-                    "type": "order_event",
-                    "strategy": fields.get("strategy", ""),
-                    "instrument": fields.get("instrument", ""),
-                    "status": fields.get("status", ""),
-                    "side": fields.get("side", ""),
-                    "qty": fields.get("qty", ""),
-                    "price": fields.get("price", ""),
-                    "ts": float(fields.get("ts", 0)),
-                }
-                for ws in list(mode_clients.get(ev_mode, ())):
-                    await _safe_send(ws, frame)
-        except RedisError:
-            await asyncio.sleep(0.5)
+            cursor = res[0][1][-1][0]
+            modes = await r.hgetall(K.STRATEGY_MODES)
+            for _id, fields in res[0][1]:
+                await _broadcast(mode_clients[modes.get(fields.get("strategy", ""), "live")], _order_frame(fields))
         except asyncio.CancelledError:
-            break
-        except Exception:
-            await asyncio.sleep(0.5)
+            return
+        except Exception as e:
+            log.debug(f"order tail: {e}")
+            await asyncio.sleep(1.0)
+
+
+async def _tail_notifications() -> None:
+    cursor = "$"
+    while True:
+        try:
+            res = await r.xread({K.NOTIFICATIONS: cursor}, count=100, block=1000)
+            if not res:
+                continue
+            cursor = res[0][1][-1][0]
+            for nid, fields in res[0][1]:
+                await _broadcast(clients, _notification_frame(nid, fields))
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            log.debug(f"notification tail: {e}")
+            await asyncio.sleep(1.0)
+
+
+async def server_notify(level: str, title: str, detail: str = "", key: str = "", retry: dict | None = None) -> None:
+    """Notification from the server itself; broadcast directly if Redis is down."""
+    rec = K.notification(level, "server", title, detail, retry, key)
+    log.log(logging.ERROR if level == "error" else logging.WARNING if level == "warn" else logging.INFO,
+            f"{title} {detail}")
+    try:
+        await r.xadd(K.NOTIFICATIONS, rec, maxlen=1000, approximate=True)
+    except Exception:
+        await _broadcast(clients, _notification_frame(f"local-{uuid.uuid4().hex[:8]}", rec))
+
+
+# ── watchdog + health ───────────────────────────────────────────────────────────
+health: dict = {"redis": {"live": None, "test": None}, "node": {}, "postgres": None, "checked": 0}
+
+
+async def _watchdog() -> None:
+    state = {"redis_live": True, "redis_test": True, "node": None, "session": None}
+    pg_checked = 0.0
+    while True:
+        await asyncio.sleep(2.0)
+        for name in MODES:
+            try:
+                await r_state[name].ping()
+                ok, err = True, None
+            except Exception as e:
+                ok, err = False, str(e)
+            health["redis"][name] = err
+            if ok != state[f"redis_{name}"]:
+                state[f"redis_{name}"] = ok
+                if ok:
+                    await server_notify("success", f"Redis ({name} DB) reachable again", key=f"redis:{name}")
+                else:
+                    await server_notify("error", f"Redis ({name} DB) unreachable",
+                                        f"{err}. If Redis runs in WSL, the distro may have shut down: "
+                                        "run launch.bat (it keeps WSL alive).", key=f"redis:{name}")
+        if health["redis"]["live"]:
+            continue
+        try:
+            hb = await r.get(K.HEARTBEAT)
+            hb = json.loads(hb) if hb else None
+        except (RedisError, ValueError):
+            continue
+        age = time.time() - hb["ts"] / 1000 if hb else None
+        alive = age is not None and age < NODE_STALE_S
+        health["node"] = {"alive": alive, "age": round(age, 1) if age is not None else None,
+                          "pid": (hb or {}).get("pid"), "session": (hb or {}).get("session"),
+                          "held_writes": (hb or {}).get("held_writes", 0), "venue": (hb or {}).get("venue"),
+                          "sandbox": (hb or {}).get("sandbox")}
+        if state["node"] is not None and alive != state["node"]:
+            if alive:
+                await server_notify("success", "Trading node is responding again", key="node")
+            else:
+                await server_notify("error", "Trading node stopped responding",
+                                    f"Last heartbeat {age:.0f}s ago. Strategy commands are refused until it's back."
+                                    if age is not None else "No heartbeat found.", key="node")
+        state["node"] = alive
+        session = (hb or {}).get("session")
+        if state["session"] and session and session != state["session"]:
+            await server_notify("warn", "Trading node restarted",
+                                "Strategies start idle after a restart; press Start to resume them.", key="node-restart")
+        state["session"] = session or state["session"]
+        if time.time() - pg_checked > 30:
+            pg_checked = time.time()
+            health["postgres"] = await asyncio.get_running_loop().run_in_executor(_BT_EXEC, pg_history.probe)
+        health["checked"] = time.time()
+
+
+# ── packet rate ─────────────────────────────────────────────────────────────────
+async def _packet_loop() -> None:
+    while True:
+        await asyncio.sleep(1.0)
+        rates = dict(_pkt_counts)
+        _pkt_counts.clear()
+        if packet_clients:
+            await _broadcast(packet_clients, {"type": "packets", "t": time.time(),
+                                              "total": sum(rates.values()), "rates": rates})
 
 
 @app.on_event("startup")
 async def _startup() -> None:
-    asyncio.create_task(_packet_loop())
-    asyncio.create_task(_portfolio_loop("live"))
-    asyncio.create_task(_portfolio_loop("test"))
-    asyncio.create_task(_tail_order_events())
+    for coro in (_packet_loop(), _portfolio_loop("live"), _portfolio_loop("test"),
+                 _tail_order_events(), _tail_notifications(), _watchdog()):
+        asyncio.create_task(coro)
+    log.info(f"dashboard up: live={K.live_url()} test={K.test_url()}")
 
 
-# ── WebSocket ────────────────────────────────────────────────────────────────
+# ── commands ────────────────────────────────────────────────────────────────────
+class CommandError(Exception):
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+
+
+def _validate_dates(cmd: dict) -> None:
+    try:
+        start = date.fromisoformat(cmd.get("start_date") or "")
+    except ValueError:
+        raise CommandError(400, "start_date is required (YYYY-MM-DD)")
+    end = None
+    if cmd.get("end_date"):
+        try:
+            end = date.fromisoformat(cmd["end_date"])
+        except ValueError:
+            raise CommandError(400, f"end_date {cmd['end_date']!r} is not YYYY-MM-DD")
+    if start >= date.today() and not end:
+        raise CommandError(400, "start_date must be before today")
+    if end is not None and end <= start:
+        raise CommandError(400, "end_date must be after start_date")
+
+
+async def _node_alive() -> tuple[bool, str]:
+    raw = await r.get(K.HEARTBEAT)
+    try:
+        hb = json.loads(raw) if raw else None
+    except ValueError:
+        hb = None
+    if not hb:
+        return False, "the trading node has not started (no heartbeat)"
+    age = time.time() - hb["ts"] / 1000
+    if age > NODE_STALE_S:
+        return False, f"the trading node is not responding (last heartbeat {age:.0f}s ago)"
+    return True, ""
+
+
+async def _data_command(cmd: dict) -> None:
+    await r.xadd(K.DATA_CMDS, {"json": json.dumps(cmd)}, maxlen=1000, approximate=True)
+
+
+async def handle_command(mode: str, cmd) -> dict:
+    """Validate and send one command. Raises CommandError(status, reason)."""
+    if mode not in MODES:
+        raise CommandError(400, f"unknown mode {mode!r}")
+    if not isinstance(cmd, dict) or not cmd.get("action"):
+        raise CommandError(400, "missing 'action'")
+    action = cmd["action"]
+    try:
+        if action in STRATEGY_ACTIONS:
+            sid = cmd.get("strategy_id")
+            if not sid:
+                raise CommandError(400, "missing 'strategy_id'")
+            if not await r.sismember(K.STRATEGIES, sid):
+                raise CommandError(404, f"unknown strategy {sid!r}")
+            if action == "start_test_strategy":
+                _validate_dates(cmd)
+            alive, why = await _node_alive()
+            if not alive:
+                raise CommandError(503, f"Command not sent: {why}.")
+            cmd_id = uuid.uuid4().hex[:12]
+            fields = {k: str(v) for k, v in cmd.items() if v is not None}
+            fields.update(mode=mode, cmd_id=cmd_id)
+            await r.xadd(K.STRATEGY_CMDS, fields, maxlen=200, approximate=True)
+            return {"ok": True, "cmd_id": cmd_id, "sent": fields}
+        if action in DATA_ACTIONS:
+            await _data_command(cmd)
+            return {"ok": True, "sent": cmd}
+    except RedisError as e:
+        raise CommandError(503, f"Redis unavailable: {e}")
+    raise CommandError(400, f"unknown action {action!r}")
+
+
+async def _command_response(mode: str, cmd) -> JSONResponse:
+    try:
+        return JSONResponse(await handle_command(mode, cmd))
+    except CommandError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=e.status)
+
+
+@app.post("/api/command")
+async def command(cmd: dict, mode: str = "live"):
+    return await _command_response(mode, cmd)
+
+
+@app.post("/api/{mode}/command")
+async def command_mode(mode: str, cmd: dict):
+    return await _command_response(mode, cmd)
+
+
+# ── WebSocket ───────────────────────────────────────────────────────────────────
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket, mode: str = Query("live")):
-    if mode not in _MODE_URLS:
-        mode = "live"
+    mode = mode if mode in MODES else "live"
     await websocket.accept()
     clients[websocket] = mode
     mode_clients[mode].add(websocket)
-
-    # Send current portfolio snapshot so a fresh client isn't blank.
-    # Always read from DB 0 (live node); _build_portfolio_sync filters by mode.
+    loop = asyncio.get_running_loop()
     try:
-        loop = asyncio.get_running_loop()
-        sig, text = await loop.run_in_executor(_PF_EXEC, _build_portfolio_sync, mode, None)
-        if text:
-            await _safe_send(websocket, json.loads(text))
-    except Exception:
-        pass
-
-    # Replay recent order events (all in DB 0, tagged by strategy). Only replay
-    # the ones belonging to this client's mode so live/test queues stay separate.
-    try:
-        mode_map = await r_state["live"].hgetall("dashboard:strategy_modes")
-    except Exception:
-        mode_map = {}
-    try:
-        past = await r_state["live"].xrevrange(ORDER_EVENTS_KEY, count=500)
-        for _id, fields in reversed(past):
-            if _event_mode(fields.get("strategy", ""), mode_map) != mode:
-                continue
-            await _safe_send(websocket, {
-                "type": "order_event",
-                "strategy": fields.get("strategy", ""),
-                "instrument": fields.get("instrument", ""),
-                "status": fields.get("status", ""),
-                "side": fields.get("side", ""),
-                "qty": fields.get("qty", ""),
-                "price": fields.get("price", ""),
-                "ts": float(fields.get("ts", 0)),
-            })
-    except Exception:
-        pass
+        frame = await loop.run_in_executor(_PF_EXEC, build_portfolio, mode)
+        if frame:
+            await _safe_send(websocket, frame)
+        modes = await r.hgetall(K.STRATEGY_MODES)
+        for _id, fields in reversed(await r.xrevrange(K.ORDER_EVENTS, count=500)):
+            if modes.get(fields.get("strategy", ""), "live") == mode:
+                await _safe_send(websocket, _order_frame(fields))
+        for nid, fields in reversed(await r.xrevrange(K.NOTIFICATIONS, count=60)):
+            await _safe_send(websocket, {**_notification_frame(nid, fields), "replay": True})
+    except Exception as e:
+        log.warning(f"ws init ({mode}): {e}")
+        await _safe_send(websocket, _notification_frame("local-init", K.notification(
+            "error", "server", "Dashboard could not load current state", str(e), key="ws-init")))
 
     try:
         while True:
-            raw = await websocket.receive_text()
             try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
+                msg = json.loads(await websocket.receive_text())
+            except ValueError:
                 continue
             action = msg.get("action")
-
-            if action == "subscribe":
-                window = msg.get("window") if msg.get("window") in WINDOWS else DEFAULT_WINDOW
-                for sym in [s for s in msg.get("symbols", []) if isinstance(s, str)]:
-                    clients.setdefault(websocket, mode)
-                    symbol_clients[sym].add(websocket)
-                    ind_clients[sym].add(websocket)
-                    await _send_command({"action": "subscribe", "instrument_id": sym})
-                    await _send_history(websocket, sym, window)
-                    await _send_indicator_history(websocket, sym)
-                    _ensure_tail(sym)
-                    _ensure_hist_tail(sym)
-                    _ensure_indicator_tail(sym)
-                    for tf in TIMEFRAMES:
-                        bt = bar_type_for(sym, tf)
-                        if bt:
+            try:
+                if action == "subscribe":
+                    window = msg.get("window") if msg.get("window") in WINDOWS else DEFAULT_WINDOW
+                    for sym in [s for s in msg.get("symbols", []) if isinstance(s, str)]:
+                        tick_clients[sym].add(websocket)
+                        ind_clients[sym].add(websocket)
+                        await _data_command({"action": "subscribe", "instrument_id": sym})
+                        await _send_history(websocket, sym, window)
+                        await _send_indicator_history(websocket, sym)
+                        _ensure_symbol_tails(sym)
+                        for tf in TIMEFRAMES:
+                            bt = bar_type_for(sym, tf)
                             bar_clients[bt].add(websocket)
                             client_bars[websocket].add(bt)
-                            await _send_command({"action": "subscribe", "instrument_id": sym, "bar_type": bt})
+                            await _data_command({"action": "subscribe", "instrument_id": sym, "bar_type": bt})
                             await _send_bar_history(websocket, sym, bt)
-                            _ensure_bar_tail(sym, bt)
-
-            elif action == "set_window":
-                sym = msg.get("symbol")
-                window = msg.get("window") if msg.get("window") in WINDOWS else DEFAULT_WINDOW
-                if isinstance(sym, str) and websocket in symbol_clients.get(sym, ()):
-                    await _send_history(websocket, sym, window)
-
-            elif action == "refresh_bars":
-                sym = msg.get("symbol")
-                bt = msg.get("bar_type")
-                if isinstance(sym, str) and isinstance(bt, str) and websocket in bar_clients.get(bt, ()):
-                    await _send_bar_history(websocket, sym, bt)
-
-            elif action == "refresh_indicators":
-                sym = msg.get("symbol")
-                if isinstance(sym, str) and websocket in ind_clients.get(sym, ()):
-                    await _send_indicator_history(websocket, sym)
-
-            elif action == "unsubscribe":
-                for sym in [s for s in msg.get("symbols", []) if isinstance(s, str)]:
-                    symbol_clients.get(sym, set()).discard(websocket)
-                    ind_clients.get(sym, set()).discard(websocket)
-                    _drop_bars_for_symbol(websocket, sym)
-
-            elif action in STRATEGY_ACTIONS:
-                ws_mode = clients.get(websocket, "live")
-                await _send_strategy_command(msg, ws_mode)
-
+                            _ensure_bar_tails(sym, bt)
+                elif action == "set_window":
+                    sym = msg.get("symbol")
+                    if isinstance(sym, str) and websocket in tick_clients.get(sym, ()):
+                        window = msg.get("window") if msg.get("window") in WINDOWS else DEFAULT_WINDOW
+                        await _send_history(websocket, sym, window)
+                elif action == "refresh_bars":
+                    sym, bt = msg.get("symbol"), msg.get("bar_type")
+                    if isinstance(sym, str) and websocket in bar_clients.get(bt, ()):
+                        await _send_bar_history(websocket, sym, bt)
+                elif action == "refresh_indicators":
+                    sym = msg.get("symbol")
+                    if isinstance(sym, str) and websocket in ind_clients.get(sym, ()):
+                        await _send_indicator_history(websocket, sym)
+                elif action == "unsubscribe":
+                    for sym in [s for s in msg.get("symbols", []) if isinstance(s, str)]:
+                        tick_clients.get(sym, set()).discard(websocket)
+                        ind_clients.get(sym, set()).discard(websocket)
+                        for bt in [b for b in client_bars.get(websocket, set()) if b.startswith(f"{sym}-")]:
+                            client_bars[websocket].discard(bt)
+                            bar_clients.get(bt, set()).discard(websocket)
+                elif action in STRATEGY_ACTIONS:
+                    try:
+                        res = await handle_command(mode, msg)
+                        await _safe_send(websocket, {"type": "command_result", **res})
+                    except CommandError as e:
+                        await _safe_send(websocket, {"type": "command_result", "ok": False, "error": str(e)})
+            except RedisError as e:
+                await _safe_send(websocket, _notification_frame("local-ws", K.notification(
+                    "error", "server", f"'{action}' failed: Redis unavailable", str(e), key="ws-redis")))
     except WebSocketDisconnect:
         pass
     finally:
-        mode_clients.get(mode, set()).discard(websocket)
+        mode_clients[mode].discard(websocket)
         clients.pop(websocket, None)
-        for sym in list(symbol_clients):
-            symbol_clients[sym].discard(websocket)
-            ind_clients.get(sym, set()).discard(websocket)
+        for subs in (tick_clients, ind_clients):
+            for s in subs.values():
+                s.discard(websocket)
         for bt in client_bars.pop(websocket, set()):
             bar_clients.get(bt, set()).discard(websocket)
 
@@ -803,235 +735,115 @@ async def ws_packets(websocket: WebSocket):
         packet_clients.discard(websocket)
 
 
-# ── REST ─────────────────────────────────────────────────────────────────────
+# ── REST ─────────────────────────────────────────────────────────────────────────
 @app.get("/api/symbols")
 async def symbols():
     out = set()
-    async for key in r.scan_iter(match="*:instruments:*", count=2000):
-        _, _, iid = key.partition(":instruments:")
-        if iid:
-            out.add(iid)
-    if not out:
-        async for key in r.scan_iter(match=f"*{TRADES_INFIX}*", count=1000):
-            sym = symbol_from_trade_key(key)
-            if sym:
-                out.add(sym)
+    try:
+        async for key in r.scan_iter(match="*:instruments:*", count=2000):
+            _, _, iid = key.partition(":instruments:")
+            if iid:
+                out.add(iid)
+        if not out:
+            async for key in r.scan_iter(match=f"*{TRADES_INFIX}*", count=1000):
+                if sym := symbol_from_trade_key(key):
+                    out.add(sym)
+    except RedisError as e:
+        return JSONResponse({"ok": False, "error": f"Redis unavailable: {e}"}, status_code=503)
     return JSONResponse(sorted(out))
 
 
-@app.post("/api/command")
-async def command(cmd: dict, mode: str = "live"):
-    if not isinstance(cmd, dict) or "action" not in cmd:
-        return JSONResponse({"ok": False, "error": "missing 'action'"}, status_code=400)
-    if cmd.get("action") in STRATEGY_ACTIONS:
-        await _send_strategy_command(cmd, mode)
-    else:
-        await _send_command(cmd)
-    return JSONResponse({"ok": True, "sent": cmd})
+@app.get("/api/health")
+async def api_health():
+    return JSONResponse({**health, "now": time.time(), "ws_clients": len(clients)})
 
 
-@app.post("/api/{mode}/command")
-async def command_mode(mode: str, cmd: dict):
-    if not isinstance(cmd, dict) or "action" not in cmd:
-        return JSONResponse({"ok": False, "error": "missing 'action'"}, status_code=400)
-    if cmd.get("action") in STRATEGY_ACTIONS:
-        await _send_strategy_command(cmd, mode)
-    else:
-        await _send_command(cmd)
-    return JSONResponse({"ok": True, "sent": cmd})
+def _consistency_sync() -> dict:
+    return consistency.server_checks(consistency.gather(r_sync["live"], r_sync["test"]))
 
 
-async def _bt_json(fn, *args) -> Response:
-    loop = asyncio.get_running_loop()
-    body = await loop.run_in_executor(_BT_EXEC, fn, *args)
+@app.get("/api/consistency")
+async def api_consistency():
+    rep = await asyncio.get_running_loop().run_in_executor(_PF_EXEC, _consistency_sync)
+    return JSONResponse(rep)
+
+
+@app.get("/api/{mode}/consistency")
+async def api_consistency_mode(mode: str):
+    return await api_consistency()
+
+
+async def _json_from(fn, *args) -> Response:
+    try:
+        body = await asyncio.get_running_loop().run_in_executor(_BT_EXEC, fn, *args)
+    except RedisError as e:
+        return JSONResponse({"ok": False, "error": f"Redis unavailable: {e}"}, status_code=503)
     return Response(content=body, media_type="application/json")
 
 
-# ── Account equity (per mode) ────────────────────────────────────────────────
 def _account_equity_sync(mode: str) -> str:
-    rc_live = r_sync["live"]   # DB 0 — live node state
-    rc_test = r_sync["test"]   # DB 1 — backtest results
-
+    rc_live, rc_test = r_sync["live"], r_sync["test"]
+    pts = [json.loads(e) for e in rc_live.lrange(K.EQUITY[mode], 0, -1)]
     if mode == "test":
-        # Prepend backtest equity curve (DB 1) then live test points (DB 0).
-        # The live test points start from ACCOUNT_START=100000 since ControlActor
-        # doesn't know the backtest ending NAV. We offset them so the chart is
-        # continuous: live_nav_adjusted = bt_end_nav + (live_nav - ACCOUNT_START).
-        bt_raw = rc_test.get("dashboard:backtest:equity")
-        bt_pts = json.loads(bt_raw) if bt_raw else []
-        live_entries = rc_live.lrange("dashboard:equity:test", 0, -1)
-        live_pts = [json.loads(e) for e in live_entries]
-        bt_end_nav = float(rc_test.get("dashboard:backtest:equity:end_nav") or 100_000)
-        nav_offset = bt_end_nav - 100_000.0
-        if bt_pts and live_pts:
-            bt_end_ts = bt_pts[-1]["ts"]
-            live_pts = [p for p in live_pts if p["ts"] > bt_end_ts]
-        # Apply offset so live portion is continuous with backtest
-        if nav_offset != 0.0:
-            live_pts = [{**p, "nav": round(p["nav"] + nav_offset, 4)} for p in live_pts]
-        all_pts = bt_pts + live_pts
-        peak_val = max((p["nav"] for p in all_pts), default=100_000.0)
-        entries = [json.dumps(p) for p in all_pts]
-        peak = str(peak_val)
+        # Backtest curve first, then the live hand-off offset to continue from the
+        # backtest's ending NAV: live_nav + (bt_end_nav - ACCOUNT_START).
+        bt = K.read_json(rc_test, f"{K.BACKTEST}:equity", []) or []
+        offset = float(rc_test.get(f"{K.BACKTEST}:equity:end_nav") or K.ACCOUNT_START) - K.ACCOUNT_START
+        if bt:
+            pts = [p for p in pts if p["ts"] > bt[-1]["ts"]]
+        pts = bt + [{**p, "nav": round(p["nav"] + offset, 4)} for p in pts]
+        peak = max((p["nav"] for p in pts), default=K.ACCOUNT_START)
     else:
-        entries = rc_live.lrange("dashboard:equity:live", 0, -1)
-        peak = rc_live.get("dashboard:equity:live:peak") or "null"
-
-    MAXP = 5000
-    n = len(entries)
-    if n > MAXP:
-        stride = n // MAXP + 1
-        kept = entries[::stride]
-        if kept[-1] != entries[-1]:
-            kept.append(entries[-1])
-        entries = kept
-    return '{"points": [%s], "peak": %s}' % (",".join(entries), peak)
+        peak = float(rc_live.get(K.EQUITY_PEAK["live"]) or K.ACCOUNT_START)
+    if len(pts) > 5000:
+        stride = len(pts) // 5000 + 1
+        pts = pts[::stride] + ([pts[-1]] if (len(pts) - 1) % stride else [])
+    return json.dumps({"points": pts, "peak": peak})
 
 
 @app.get("/api/{mode}/account/equity")
 async def account_equity(mode: str):
-    if mode not in _MODE_URLS:
-        mode = "live"
-    return await _bt_json(_account_equity_sync, mode)
-
-
-# ── Backtest meta / positions (test mode only) ────────────────────────────────
-BACKTEST_PREFIX = "dashboard:backtest"
-
-
-def _bt_meta_sync(mode: str) -> str:
-    return r_sync[mode].get(f"{BACKTEST_PREFIX}:meta") or '{"status": "none"}'
-
-
-def _bt_positions_sync(mode: str) -> str:
-    return (r_sync[mode].get(f"{BACKTEST_PREFIX}:positions")
-            or '{"positions": [], "closed_positions": [], "pnl": {}}')
+    return await _json_from(_account_equity_sync, mode if mode in MODES else "live")
 
 
 @app.get("/api/{mode}/backtest/meta")
 async def backtest_meta(mode: str):
-    if mode not in _MODE_URLS:
-        mode = "live"
-    return await _bt_json(_bt_meta_sync, mode)
+    return await _json_from(lambda: r_sync["test"].get(f"{K.BACKTEST}:meta") or '{"status": "none"}')
 
 
 @app.get("/api/{mode}/backtest/positions")
 async def backtest_positions(mode: str):
-    if mode not in _MODE_URLS:
-        mode = "live"
-    return await _bt_json(_bt_positions_sync, mode)
+    return await _json_from(lambda: r_sync["test"].get(f"{K.BACKTEST}:positions")
+                            or '{"positions": [], "closed_positions": [], "pnl": {}}')
 
 
 def _positions_sync(mode: str) -> str:
-    """Mode-filtered portfolio: live positions merged with backtest history."""
-    _, text = _build_portfolio_sync(mode, None)
-    live_snap = json.loads(text) if text else {}
-    positions = list(live_snap.get("positions", []))
-    closed    = list(live_snap.get("closed_positions", []))
-    pnl       = dict(live_snap.get("pnl", {}))
-
-    # For test mode, also merge backtest closed positions from the engine run.
-    if mode == "test":
-        try:
-            raw = r_sync["test"].get("dashboard:backtest:positions")
-            if raw:
-                bt = json.loads(raw)
-                bt_closed = bt.get("closed_positions", [])
-                bt_open   = bt.get("positions", [])
-                # Merge: backtest positions first (oldest), live on top
-                existing_ids = {p.get("id") for p in closed}
-                for p in bt_closed:
-                    if p.get("id") not in existing_ids:
-                        closed.append(p)
-                for p in bt_open:
-                    if p.get("id") not in existing_ids:
-                        positions.append(p)
-                # Recompute merged PnL
-                for p in bt_closed:
-                    d = pnl.setdefault(p.get("ccy") or "USDT", {"realized": 0.0, "unrealized": 0.0, "total": 0.0})
-                    d["realized"] += p.get("realized", 0.0)
-                    d["total"]     = d["realized"] + d["unrealized"]
-        except Exception:
-            pass
-
-    closed.sort(key=lambda c: c.get("ts_closed", 0), reverse=True)
-    return json.dumps({"positions": positions, "closed_positions": closed, "pnl": pnl})
-
-
-def _merge_backtest_into_snap(snap: dict) -> dict:
-    """Merge dashboard:backtest:positions (test Redis) into a portfolio snapshot."""
-    try:
-        raw = r_sync["test"].get("dashboard:backtest:positions")
-        if not raw:
-            return snap
-        bt = json.loads(raw)
-        existing_ids = {p.get("id") for p in snap.get("closed_positions", [])}
-        extra_closed = [p for p in bt.get("closed_positions", []) if p.get("id") not in existing_ids]
-        extra_open   = [p for p in bt.get("positions", [])         if p.get("id") not in existing_ids]
-        if not extra_closed and not extra_open:
-            return snap
-        positions = snap.get("positions", []) + extra_open
-        closed    = snap.get("closed_positions", []) + extra_closed
-        closed.sort(key=lambda c: c.get("ts_closed", 0), reverse=True)
-        pnl = dict(snap.get("pnl", {}))
-        for p in extra_closed:
-            d = pnl.setdefault(p.get("ccy") or "USDT", {"realized": 0.0, "unrealized": 0.0})
-            d["realized"] += p.get("realized", 0.0)
-        for p in extra_open:
-            d = pnl.setdefault(p.get("ccy") or "USDT", {"realized": 0.0, "unrealized": 0.0})
-            d["unrealized"] += p.get("unrealized", 0.0)
-        for v in pnl.values():
-            v["total"] = v["realized"] + v["unrealized"]
-        return {**snap, "positions": positions, "closed_positions": closed, "pnl": pnl}
-    except Exception:
-        return snap
+    f = build_portfolio(mode) or {}
+    return json.dumps({"positions": f.get("positions", []), "closed_positions": f.get("closed_positions", []),
+                       "pnl": f.get("pnl", {})})
 
 
 @app.get("/api/{mode}/positions")
 async def positions(mode: str):
-    if mode not in _MODE_URLS:
-        mode = "live"
-    return await _bt_json(_positions_sync, mode)
+    return await _json_from(_positions_sync, mode if mode in MODES else "live")
 
 
-# ── Test-mode chart bars: refresh bar history for a symbol after backtest ─────
-def _refresh_chart_bars_sync(mode: str, symbol: str) -> str:
-    """Return backtest chart bars (all timeframes) + EMA indicators for a symbol.
-
-    Response shape: {"bars": [{tf, bar_type, bars}], "indicators": [{ts, tf, fast_ema, slow_ema}]}
-    """
-    rc = r_sync["test"]   # backtest data always in DB 1
-    bars_result = []
-    for tf, spec in [("1m", "1-MINUTE"), ("5m", "5-MINUTE"), ("15m", "15-MINUTE"), ("1h", "1-HOUR")]:
-        src = "EXTERNAL"
-        bar_type = f"{symbol}-{spec}-LAST-{src}"
-        key = f"test:chart:{bar_type}"
-        raw = rc.get(key)
-        if raw:
-            try:
-                bars_result.append({"tf": tf, "bar_type": bar_type, "bars": json.loads(raw)})
-            except Exception:
-                pass
-
-    # Backtest EMA indicators (written by backtest_runner as {ts, fast_ema, slow_ema} lists)
-    indicators = []
-    raw_ind = rc.get(f"dashboard:backtest:indicators:{symbol}")
-    if raw_ind:
-        try:
-            for pt in json.loads(raw_ind):
-                pt["tf"] = "1-MINUTE-LAST"   # backtest always runs on 1m bars
-                indicators.append(pt)
-        except Exception:
-            pass
-
-    return json.dumps({"bars": bars_result, "indicators": indicators})
+def _chart_bars_sync(symbol: str) -> str:
+    """Backtest chart bars (all timeframes) + indicator series for one symbol."""
+    rc = r_sync["test"]
+    bars = []
+    for tf, spec in (("1m", "1-MINUTE"), ("5m", "5-MINUTE"), ("15m", "15-MINUTE"), ("1h", "1-HOUR")):
+        bt = f"{symbol}-{spec}-LAST-EXTERNAL"
+        if (data := K.read_json(rc, f"{K.TEST_CHART}{bt}")) is not None:
+            bars.append({"tf": tf, "bar_type": bt, "bars": data})
+    inds = [{**pt, "tf": "1-MINUTE-LAST"} for pt in K.read_json(rc, f"{K.BACKTEST}:indicators:{symbol}", []) or []]
+    spec = K.read_json(rc, f"{K.BACKTEST}:chart_spec", []) or []
+    return json.dumps({"bars": bars, "indicators": inds, "spec": spec})
 
 
 @app.get("/api/{mode}/chart_bars/{symbol}")
 async def chart_bars(mode: str, symbol: str):
-    if mode not in _MODE_URLS:
-        mode = "live"
-    return await _bt_json(_refresh_chart_bars_sync, mode, symbol)
+    return await _json_from(_chart_bars_sync, symbol)
 
 
 @app.get("/", response_class=HTMLResponse)

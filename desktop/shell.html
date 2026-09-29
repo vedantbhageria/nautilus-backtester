@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+<title>Nautilus</title>
+<style>
+  :root { --bar:#0d1017; --panel2:#161d29; --border:#232b38; --text:#e6edf3; --muted:#8b96a5; --faint:#5c6773;
+          --accent:#58a6ff; --green:#3fb950; --red:#f85149; --amber:#d29922; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; overflow:hidden; }
+  body { background:var(--bar); color:var(--text); font:12px/1 "Segoe UI",system-ui,sans-serif;
+         -webkit-font-smoothing:antialiased; user-select:none; border-bottom:1px solid var(--border);
+         display:flex; align-items:center; padding:0 150px 0 12px; gap:4px; -webkit-app-region:drag; }
+  .brand { display:flex; align-items:center; gap:8px; margin-right:14px; }
+  .brand i { width:8px; height:8px; border-radius:2px; background:var(--accent); transform:rotate(45deg);
+             box-shadow:0 0 9px rgba(88,166,255,.75); }
+  .brand b { font-size:12.5px; letter-spacing:.02em; }
+  button { -webkit-app-region:no-drag; font:inherit; color:var(--muted); background:none; border:1px solid transparent;
+           border-radius:6px; height:26px; padding:0 11px; display:inline-flex; align-items:center; gap:7px;
+           cursor:pointer; transition:background .15s, color .15s, border-color .15s; }
+  button:hover { background:var(--panel2); color:var(--text); }
+  button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  .tab.active { background:var(--panel2); color:var(--text); border-color:var(--border); }
+  .tab kbd { font:10px ui-monospace,Consolas,monospace; color:var(--faint); }
+  .dot { width:7px; height:7px; border-radius:50%; background:var(--faint); flex-shrink:0; }
+  [data-s=ok] .dot { background:var(--green); box-shadow:0 0 6px rgba(63,185,80,.6); }
+  [data-s=wait] .dot { background:var(--amber); animation:pulse 1s ease-in-out infinite; }
+  [data-s=fail] .dot { background:var(--red); box-shadow:0 0 6px rgba(248,81,73,.6); }
+  [data-s=off] { opacity:.55; }
+  @keyframes pulse { 50% { opacity:.35; } }
+  .spacer { flex:1; }
+  .svc { font-size:11px; }
+  .icon { padding:0 7px; }
+  .icon svg { width:14px; height:14px; stroke:currentColor; fill:none; stroke-width:1.7;
+              stroke-linecap:round; stroke-linejoin:round; }
+  .sep { width:1px; height:16px; background:var(--border); margin:0 4px; }
+</style>
+</head>
+<body>
+  <div class="brand"><i></i><b>Nautilus</b></div>
+  <button class="tab" id="tab-backtester" data-tab="backtester" title="Backtester (Ctrl+1)">
+    <span class="dot"></span>Backtester <kbd>Ctrl 1</kbd></button>
+  <button class="tab" id="tab-live" data-tab="live" title="Live dashboard (Ctrl+2)">
+    <span class="dot"></span>Live <kbd>Ctrl 2</kbd></button>
+  <div class="spacer"></div>
+  <button class="svc" id="svc-node" title="Live trading node"><span class="dot"></span>Node</button>
+  <button class="svc" id="svc-redis" title="Redis"><span class="dot"></span>Redis</button>
+  <span class="sep"></span>
+  <button class="icon" id="reload" title="Reload this tab (F5)">
+    <svg viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3h-3"/></svg></button>
+  <button class="icon" id="bell" title="Send a test notification">
+    <svg viewBox="0 0 16 16"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg></button>
+  <button class="icon" id="logs" title="Open the log folder">
+    <svg viewBox="0 0 16 16"><path d="M2.5 4.5h4l1.5 1.5h5.5v6.5h-11z"/></svg></button>
+<script>
+  const D = window.desktop.shell;
+  const tip = { ok: 'running', wait: 'starting...', fail: 'down - click to retry' };
+  function paint(st) {
+    for (const id of ['backtester', 'live']) {
+      const b = document.getElementById('tab-' + id);
+      b.dataset.s = st[id];
+      b.classList.toggle('active', st.active === id);
+      b.title = `${id === 'live' ? 'Live dashboard' : 'Backtester'}: ${(st.detail || {})[id] || tip[st[id]]}` +
+                `  (Ctrl+${id === 'live' ? 2 : 1})`;
+    }
+    const r = document.getElementById('svc-redis');
+    r.dataset.s = st.redis;
+    r.title = 'Redis: ' + ((st.detail || {}).redis || tip[st.redis]) + (st.redis === 'fail' ? ' - click to retry' : '');
+    const n = document.getElementById('svc-node');
+    n.dataset.s = st.node;
+    n.title = 'Live trading node (scripts/binance_data.py): ' + ((st.detail || {}).node || tip[st.node] || st.node) +
+              (st.node === 'fail' ? ' - click to start' : '');
+  }
+  document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () => {
+    const id = b.dataset.tab;
+    if (b.dataset.s === 'fail') D.retry(id);
+    D.tab(id);
+  }));
+  document.getElementById('svc-redis').addEventListener('click', e => {
+    if (e.currentTarget.dataset.s !== 'ok') D.retry('redis');
+  });
+  document.getElementById('svc-node').addEventListener('click', e => {
+    if (e.currentTarget.dataset.s === 'fail') D.retry('node');
+  });
+  document.getElementById('reload').addEventListener('click', () => D.reload());
+  document.getElementById('bell').addEventListener('click', () => D.testNotify());
+  document.getElementById('logs').addEventListener('click', () => D.logs());
+  D.onState(paint);
+  D.get().then(paint);
+</script>
+</body>
+</html>

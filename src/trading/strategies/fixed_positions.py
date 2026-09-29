@@ -1,177 +1,56 @@
-import json
-import os
-import time
 from decimal import Decimal
 
-from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.trading.strategy import Strategy
 
-STRATEGY_SET = "dashboard:strategies"
-METRICS_PREFIX = "dashboard:metrics:"
-
-_MIN_ORDER_USD = 3
-_REBALANCE_COOLDOWN = 5.0
+from trading.strategies.base import MIN_ORDER_USD, DashboardStrategy, DashboardStrategyConfig
 
 
-class FixedNotionalConfig(StrategyConfig, frozen=True):
-    instrument_ids: tuple[InstrumentId, ...]
+class FixedNotionalConfig(DashboardStrategyConfig, frozen=True):
     target_usd: Decimal = Decimal("2000")
     rebalance_threshold: float = 0.001
 
 
-class FixedNotional(Strategy):
+class FixedNotional(DashboardStrategy):
+    """Hold ``target_usd`` of each instrument; rebalance on every trade tick
+    once the position drifts more than ``rebalance_threshold``."""
 
-    def __init__(self, config: FixedNotionalConfig):
-        super().__init__(config)
-        self._pending: set[str] = set()
-        self._last_rebalance: dict[str, float] = {}
-        self._redis = None
-        # Trading gate, flipped by the controller (binance_data.py). The node
-        # auto-starts every strategy on boot; while disarmed the strategy
-        # registers with the dashboard but does NOT subscribe or trade.
-        self._active = False
+    def description(self) -> str:
+        c = self.config
+        return (f"Holds ${float(c.target_usd):,.0f} notional of each of {len(c.instrument_ids)} instruments. "
+                f"Rebalances when drift exceeds {c.rebalance_threshold * 100:.1f}%.")
 
-    def on_start(self) -> None:
-        # Always register with the dashboard so the strategy is visible (with
-        # its description) even while stopped.
-        try:
-            import redis as _redis
-            self._redis = _redis.Redis.from_url(
-                os.getenv("REDIS_URL", "redis://localhost:6379"), decode_responses=True,
-            )
-            self._redis.sadd(STRATEGY_SET, str(self.id))
-            self._publish_metrics()
-        except Exception as e:
-            self._redis = None
-            self.log.warning(f"Dashboard registry unavailable: {e}")
+    def arm(self) -> str:
+        msg = super().arm()
+        for iid in self._tradeable:
+            self.subscribe_trade_ticks(iid)
+        return msg
 
-        # Only subscribe to market data (and thus start trading) when armed.
-        if self._active:
-            for iid in self.config.instrument_ids:
-                self.subscribe_trade_ticks(iid)
-            self.log.info(f"Armed: subscribed to {len(self.config.instrument_ids)} instruments")
-        else:
-            self.log.info("Disarmed on start — idle until armed by controller")
+    def disarm(self) -> str:
+        for iid in self._tradeable:
+            self.unsubscribe_trade_ticks(iid)
+        return super().disarm()
+
+    def close_all(self) -> str:
+        for iid in self._tradeable:
+            self.unsubscribe_trade_ticks(iid)
+        return super().close_all()
 
     def on_trade_tick(self, tick: TradeTick) -> None:
-        if not self._active:
-            return
-        self._maybe_rebalance(tick.instrument_id)
+        if self.armed and not self.is_exiting():
+            self._rebalance(tick.instrument_id, float(tick.price))
 
-    def _maybe_rebalance(self, iid: InstrumentId) -> None:
-        key = str(iid)
-
-        if key in self._pending:
+    def _rebalance(self, iid: InstrumentId, price: float) -> None:
+        if price <= 0 or self.has_working_order(iid):
             return
-
-        """
-        now = time.monotonic()
-        if now - self._last_rebalance.get(key, 0) < _REBALANCE_COOLDOWN:
-            return
-        """
-
-        tick = self.cache.trade_tick(iid)
-        if tick is None:
-            return
-        price = float(tick.price)
-        if price <= 0:
-            return
-
-        exposure = self.portfolio.net_exposure(iid)
-        current_value = float(exposure) if exposure else 0.0
+        value = self.net_qty(iid) * price
         target = float(self.config.target_usd)
-        deviation = (current_value - target) / target
-
-        if abs(deviation) < self.config.rebalance_threshold:
+        if abs(value - target) / target < self.config.rebalance_threshold:
             return
-
-        diff_usd = target - current_value
-        if abs(diff_usd) < _MIN_ORDER_USD:
-            return
-
-        instrument = self.cache.instrument(iid)
-        if instrument is None:
-            return
-
-        raw_qty = abs(diff_usd) / price
-        qty = instrument.make_qty(
-            Decimal(str(raw_qty)).quantize(
-                Decimal(10) ** -instrument.size_precision
-            )
-        )
-        if float(qty) <= 0:
-            return
-
-        side = OrderSide.BUY if diff_usd > 0 else OrderSide.SELL
-        order = self.order_factory.market(iid, side, qty)
-        self._pending.add(key)
-
-        """self._last_rebalance[key] = now"""
-
-        self.log.info(
-            f"Rebalance {key}: value={current_value:.2f} target={target:.2f} "
-            f"deviation={deviation*100:.1f}% -> {side.name} {qty}"
-        )
-        self._publish_order_event("submitted", iid, side.name, str(qty))
-        self.submit_order(order)
-
-    def on_order_filled(self, event) -> None:
-        self._pending.discard(str(event.instrument_id))
-        self._publish_order_event("filled", event.instrument_id)
-        self._publish_metrics()
-
-    def on_order_rejected(self, event) -> None:
-        self._pending.discard(str(event.instrument_id))
-        self._publish_order_event("rejected", event.instrument_id)
-
-    def on_order_canceled(self, event) -> None:
-        self._pending.discard(str(event.instrument_id))
-        self._publish_order_event("canceled", event.instrument_id)
-
-    def _publish_order_event(self, status: str, instrument_id, side: str = "", qty: str = "") -> None:
-        if self._redis is None:
-            return
-        try:
-            self._redis.xadd("dashboard:order_events", {
-                "strategy": str(self.id),
-                "instrument": str(instrument_id),
-                "status": status,
-                "side": side,
-                "qty": qty,
-                "ts": str(time.time()),
-            }, maxlen=500, approximate=True)
-        except Exception:
-            pass
-
-    def _publish_metrics(self) -> None:
-        if self._redis is None:
-            return
-        target = float(self.config.target_usd)
-        holdings = {}
-        for iid in self.config.instrument_ids:
-            exposure = self.portfolio.net_exposure(iid)
-            holdings[str(iid)] = round(float(exposure) if exposure else 0.0, 2)
-        try:
-            self._redis.set(
-                f"{METRICS_PREFIX}{self.id}",
-                json.dumps({
-                    "description": (
-                        f"Holds ${target:,.0f} notional of each of "
-                        f"{len(self.config.instrument_ids)} instruments. "
-                        f"Rebalances when drift exceeds "
-                        f"{self.config.rebalance_threshold*100:.0f}%."
-                    ),
-                    "target_usd": target,
-                    "holdings": holdings,
-                }),
-            )
-        except Exception:
-            pass
-
-    def on_stop(self) -> None:
-        # Keep metrics in Redis so the strategy stays visible on the dashboard
-        # (with its description) while stopped. Nothing to tear down here.
-        pass
+        diff = target - value
+        if abs(diff) < MIN_ORDER_USD:
+            return                          # drift too small to trade; not an error
+        side = OrderSide.BUY if diff > 0 else OrderSide.SELL
+        if self.submit_market(iid, side, abs(diff), price):
+            self.publish_metrics({"target_usd": target})

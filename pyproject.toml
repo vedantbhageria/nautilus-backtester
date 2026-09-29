@@ -10,6 +10,8 @@ dependencies = [
     "redis",
     "python-dotenv",
     "pyarrow",
+    "requests",          # backtest kline fetch
+    "psycopg2-binary",   # chart history from the backtester's Postgres (optional at runtime)
 ]
 
 [project.optional-dependencies]

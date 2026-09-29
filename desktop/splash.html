@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+<title>Nautilus</title>
+<style>
+  :root { --bg:#0b0e14; --panel:#11161f; --border:#232b38; --text:#e6edf3; --muted:#8b96a5;
+          --faint:#5c6773; --accent:#58a6ff; --green:#3fb950; --red:#f85149; --amber:#d29922; }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; overflow:hidden; }
+  body { background:radial-gradient(520px 300px at 50% 36%, rgba(56,139,253,.13), transparent 70%), var(--bg);
+         color:var(--text); font:13px/1.5 "Segoe UI",system-ui,sans-serif; -webkit-font-smoothing:antialiased;
+         -webkit-app-region:drag; user-select:none; border:1px solid var(--border); border-radius:10px; }
+  .wrap { height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; }
+  .mark { position:relative; width:46px; height:46px; margin-bottom:18px; transform:rotate(45deg);
+          animation:spin 2.6s cubic-bezier(.6,0,.3,1) infinite; }
+  .mark i { position:absolute; width:19px; height:19px; border-radius:3px; background:var(--accent); }
+  .mark i:nth-child(1){ top:0; left:0; animation:blade 1.5s ease-in-out infinite; }
+  .mark i:nth-child(2){ top:0; right:0; animation:blade 1.5s ease-in-out .12s infinite; }
+  .mark i:nth-child(3){ bottom:0; right:0; animation:blade 1.5s ease-in-out .24s infinite; }
+  .mark i:nth-child(4){ bottom:0; left:0; animation:blade 1.5s ease-in-out .36s infinite; }
+  @keyframes blade { 0%,100%{ transform:scale(.55); opacity:.3; } 50%{ transform:scale(1); opacity:1; } }
+  @keyframes spin { to { transform:rotate(405deg); } }
+  .word { display:flex; gap:3px; font-weight:700; font-size:19px; letter-spacing:.22em; margin-left:.22em; }
+  .word span { opacity:0; transform:translateY(7px); animation:letter .5s cubic-bezier(.4,0,.2,1) forwards; }
+  @keyframes letter { to { opacity:1; transform:none; } }
+  .sub { margin-top:4px; font-size:10.5px; color:var(--faint); text-transform:uppercase; letter-spacing:.26em;
+         opacity:0; animation:fade .6s .5s ease forwards; }
+  .steps { margin-top:22px; width:260px; display:flex; flex-direction:column; gap:7px;
+           opacity:0; animation:fade .5s .6s ease forwards; }
+  .st { display:flex; align-items:center; gap:10px; font-size:12px; color:var(--muted); }
+  .st .ic { width:14px; height:14px; flex-shrink:0; border-radius:50%; position:relative; }
+  .st[data-s=wait] .ic { border:2px solid var(--border); border-top-color:var(--accent); animation:rot .8s linear infinite; }
+  .st[data-s=ok] .ic { background:var(--green); box-shadow:0 0 8px rgba(63,185,80,.5); }
+  .st[data-s=ok] .ic::after { content:''; position:absolute; left:4.5px; top:2px; width:3px; height:6px;
+                              border:solid #0b0e14; border-width:0 2px 2px 0; transform:rotate(45deg); }
+  .st[data-s=fail] .ic { background:var(--red); }
+  .st[data-s=fail] .ic::after { content:'!'; position:absolute; inset:0; font:700 10px/14px sans-serif;
+                                color:#0b0e14; text-align:center; }
+  .st[data-s=ok] .nm { color:var(--text); }
+  .st[data-s=off] { opacity:.45; } .st[data-s=off] .ic { border:2px solid var(--border); }
+  .st .dt { margin-left:auto; color:var(--faint); font-size:11px; white-space:nowrap; overflow:hidden;
+            text-overflow:ellipsis; max-width:130px; }
+  .st[data-s=fail] .dt { color:var(--red); }
+  @keyframes rot { to { transform:rotate(360deg); } }
+  @keyframes fade { to { opacity:1; } }
+  @media (prefers-reduced-motion: reduce) {
+    .mark,.mark i,.st .ic { animation:none !important; }
+    .word span,.sub,.steps { opacity:1; transform:none; animation:none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="mark"><i></i><i></i><i></i><i></i></div>
+  <div class="word" id="word"></div>
+  <div class="sub">backtesting &middot; live</div>
+  <div class="steps">
+    <div class="st" id="redis" data-s="wait"><span class="ic"></span><span class="nm">Redis</span><span class="dt"></span></div>
+    <div class="st" id="backtester" data-s="wait"><span class="ic"></span><span class="nm">Backtester server</span><span class="dt"></span></div>
+    <div class="st" id="live" data-s="wait"><span class="ic"></span><span class="nm">Live dashboard</span><span class="dt"></span></div>
+    <div class="st" id="node" data-s="wait"><span class="ic"></span><span class="nm">Trading node</span><span class="dt"></span></div>
+  </div>
+</div>
+<script>
+  'NAUTILUS'.split('').forEach((c, i) => {
+    const s = document.createElement('span');
+    s.textContent = c;
+    s.style.animationDelay = (0.05 + i * 0.05).toFixed(2) + 's';
+    document.getElementById('word').appendChild(s);
+  });
+  function paint(st) {
+    for (const id of ['redis', 'backtester', 'live', 'node']) {
+      const el = document.getElementById(id);
+      el.dataset.s = st[id] || 'wait';
+      el.querySelector('.dt').textContent = (st.detail && st.detail[id]) || '';
+    }
+  }
+  if (window.desktop) {
+    window.desktop.shell.onState(paint);
+    window.desktop.shell.get().then(paint);
+  }
+</script>
+</body>
+</html>

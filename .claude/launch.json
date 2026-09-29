@@ -1,0 +1,43 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "nautilus-backtester",
+      "runtimeExecutable": "py",
+      "runtimeArgs": ["-3.14", "C:\\Users\\bhage\\OneDrive\\Desktop\\nautilus_backtesting\\backtester\\backend\\server.py"],
+      "port": 8002
+    },
+    {
+      "name": "nautilus-live",
+      "runtimeExecutable": "C:\\Users\\bhage\\OneDrive\\Desktop\\nautilus_backtesting\\.venv\\Scripts\\python.exe",
+      "runtimeArgs": ["-m", "uvicorn", "--app-dir", "C:\\Users\\bhage\\OneDrive\\Desktop\\nautilus_backtesting", "server.app:app", "--host", "127.0.0.1", "--port", "8000"],
+      "port": 8000
+    },
+    {
+      "name": "bt-dashboard",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["C:\\Users\\bhage\\OneDrive\\Desktop\\backtrader_backtesting\\server.py"],
+      "port": 8001
+    },
+    {
+      "name": "bt-dashboard-preview",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m", "uvicorn",
+        "--app-dir", "C:\\Users\\bhage\\OneDrive\\Desktop\\backtrader_backtesting",
+        "server:app",
+        "--port", "8002"
+      ],
+      "port": 8002
+    },
+    {
+      "name": "scratch-preview",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m", "http.server", "8777",
+        "--directory", "C:\\Users\\bhage\\AppData\\Local\\Temp\\claude\\C--Users-bhage-OneDrive-Desktop-nautilus-backtesting\\16573d70-1620-41d2-92b7-2052c65dbc53\\scratchpad"
+      ],
+      "port": 8777
+    }
+  ]
+}

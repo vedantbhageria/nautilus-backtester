@@ -1,0 +1,85 @@
+[
+ {
+  "id": "20260718-075604-EMNonLinScaled",
+  "strategy": "EMNonLinScaled",
+  "timeframe": "1h",
+  "name": "Scale-In default",
+  "params": {
+   "k": 4,
+   "scale_levels": 2,
+   "scale_size_mult": 0.5,
+   "scale_max_usd": 2000,
+   "diag": true,
+   "pyfolio_report": false
+  },
+  "notes": "",
+  "default": false,
+  "saved": "2026-07-18T07:56:04+00:00"
+ },
+ {
+  "id": "20260718-080036-EMNonLinTest",
+  "strategy": "EMNonLinTest",
+  "timeframe": "1h",
+  "name": "Trail Exit Default",
+  "params": {
+   "k": 4,
+   "long_only": false,
+   "use_trail": true,
+   "trail_pct": -0.15,
+   "diag": true,
+   "pyfolio_report": false
+  },
+  "notes": "",
+  "default": false,
+  "saved": "2026-07-18T08:00:36+00:00"
+ },
+ {
+  "id": "20260718-080628-EMNonLinTest",
+  "strategy": "EMNonLinTest",
+  "timeframe": "1h",
+  "name": "default",
+  "params": {
+   "k": 4,
+   "long_only": false,
+   "use_trail": false,
+   "trail_pct": 0,
+   "diag": true,
+   "pyfolio_report": false
+  },
+  "notes": "",
+  "default": true,
+  "saved": "2026-07-18T08:06:28+00:00"
+ },
+ {
+  "id": "20260720-055810-EMNonLinScaled",
+  "strategy": "EMNonLinScaled",
+  "timeframe": "1h",
+  "name": "weird",
+  "params": {
+   "k": 4,
+   "d0": 0,
+   "dead": 300,
+   "d_max": 0.5,
+   "q_acc": 1e-10,
+   "q_vel": 1e-07,
+   "warmup": 180,
+   "q_level": 0.0001,
+   "em_iters": 2,
+   "max_hold": 0,
+   "scale_in": true,
+   "em_window": 720,
+   "long_only": false,
+   "reversion": true,
+   "trade_usd": 2000,
+   "trail_pct": null,
+   "em_interval": 1440,
+   "scale_levels": 1,
+   "scale_max_usd": 2000,
+   "scale_step_pct": 0.03,
+   "scale_size_mult": 1
+  },
+  "notes": "9000 compared to (3000) default is crazy",
+  "default": true,
+  "saved": "2026-07-20T05:58:10+00:00"
+ }
+]

@@ -1,0 +1,25 @@
+{
+  "name": "nautilus-desktop",
+  "productName": "Nautilus",
+  "version": "1.0.0",
+  "description": "Desktop shell for the Nautilus backtester and live dashboard: starts Redis (WSL) and both servers, hosts them in tabs, and shows the app's own notifications.",
+  "main": "main.js",
+  "author": "vedantbhageria",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "33.4.11"
+  },
+  "build": {
+    "appId": "com.nautilus.desktop",
+    "productName": "Nautilus",
+    "directories": { "output": "dist" },
+    "files": ["*.js", "*.html", "*.css", "package.json"],
+    "win": { "target": ["portable"], "signAndEditExecutable": false },
+    "portable": { "artifactName": "Nautilus.exe" }
+  }
+}

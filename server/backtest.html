@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Nautilus Backtest</title>
+<!-- Design system is the backtrader dashboard's, served verbatim from
+     /backtest.css so this portal looks and behaves identically to it.
+     The live pipeline dashboard at / keeps its own mono/amber aesthetic. -->
+<link rel="stylesheet" href="/backtest.css">
+<style>
+  /* Only additions needed for surfaces backtrader has that this page builds
+     differently (it has no job queue, so no job board / marquee / panes). */
+  body { overflow: auto; }
+  #bt-main { padding: 16px var(--gutter) 48px; max-width: var(--content-max);
+             margin: 0 auto; }
+  .bt-grid { display: grid; gap: 14px; }
+  .bt-grid.c2 { grid-template-columns: 1fr 1fr; }
+  @media (max-width: 1100px) { .bt-grid.c2 { grid-template-columns: 1fr; } }
+  #eqwrap, #ddwrap { position: relative; width: 100%; }
+  #eqwrap canvas, #ddwrap canvas { display: block; width: 100%; }
+  .bt-tbl { border-collapse: collapse; width: 100%; font-size: var(--fs-sm); }
+  .bt-tbl th, .bt-tbl td { padding: 7px 12px; text-align: left; white-space: nowrap; }
+  .bt-tbl td.num, .bt-tbl th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .bt-tbl thead th { position: sticky; top: 0; background: var(--panel2);
+    color: var(--muted); font-weight: 600; font-size: var(--fs-xs);
+    text-transform: uppercase; letter-spacing: .05em;
+    border-bottom: 1px solid var(--border); z-index: 1; }
+  .bt-tbl tbody tr:nth-child(odd) td { background: var(--zebra); }
+  .bt-tbl tbody tr:hover td { background: var(--panel3); }
+  .bt-scroll { max-height: 62vh; overflow: auto; border: 1px solid var(--border);
+    border-radius: var(--r-lg); }
+  .statgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px; margin-bottom: 14px; }
+</style>
+</head>
+<body>
+
+<div id="boot">
+  <div class="boot-inner">
+    <div class="boot-mark"><i></i><i></i><i></i><i></i></div>
+    <div class="boot-word">
+      <span>N</span><span>A</span><span>U</span><span>T</span><span>I</span>
+      <span>L</span><span>U</span><span>S</span>
+    </div>
+    <div class="boot-sub">backtest portal</div>
+    <div class="boot-bar"><i id="bootfill"></i></div>
+    <div class="boot-step" id="bootstep">loading results…</div>
+  </div>
+</div>
+
+<nav>
+  <span class="navbrand" title="Nautilus backtest portal">
+    <span class="navbrand-mark"></span><span class="navbrand-txt">Nautilus</span>
+  </span>
+  <span class="navsep" aria-hidden="true"></span>
+  <button class="tab active" data-view="overview">Overview</button>
+  <button class="tab" data-view="positions">Positions</button>
+  <button class="tab" data-view="symbols">Symbols</button>
+  <button class="tab" data-view="stats">Stats</button>
+  <span class="navright">
+    <span id="runstatus"></span>
+    <a class="ghostbtn" href="/" title="Back to the live pipeline dashboard">Live →</a>
+    <button id="refreshbtn" class="ghostbtn" title="Re-read results from Redis">Refresh</button>
+  </span>
+</nav>
+
+<div id="ribbon" aria-live="polite">
+  <span class="rb" id="rb-status"><i class="rb-dot"></i><b>—</b><span class="rb-k">run</span></span>
+  <span class="rb-sep"></span>
+  <span class="rb" id="rb-strategy"><b>—</b><span class="rb-k">strategy</span></span>
+  <span class="rb-sep"></span>
+  <span class="rb" id="rb-range"><b>—</b><span class="rb-k">range</span></span>
+  <span class="rb-sep"></span>
+  <span class="rb" id="rb-trades"><b>—</b><span class="rb-k">positions</span></span>
+  <span class="rb-spacer"></span>
+  <span class="rb" id="rb-pnl"><b>—</b><span class="rb-k">net pnl</span></span>
+</div>
+
+<div id="bt-main">
+
+  <section id="view-overview">
+    <div class="statgrid" id="statcards"></div>
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-h">Equity curve
+        <span class="note" style="margin-left:8px">NAV = engine account balance + open-position mark-to-market</span>
+      </div>
+      <div class="panel-b"><div id="eqwrap"><canvas id="eqcanvas" height="300"></canvas></div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-h">Drawdown <span class="note" style="margin-left:8px">% below running peak</span></div>
+      <div class="panel-b"><div id="ddwrap"><canvas id="ddcanvas" height="170"></canvas></div></div>
+    </div>
+  </section>
+
+  <section id="view-positions" hidden>
+    <div class="panel">
+      <div class="panel-h">Closed positions <span class="note" id="poscount" style="margin-left:8px"></span></div>
+      <div class="panel-b" style="padding:0">
+        <div class="bt-scroll"><table class="bt-tbl" id="postbl2">
+          <thead><tr>
+            <th>Instrument</th><th>Side</th><th class="num">Qty</th>
+            <th class="num">Entry</th><th class="num">Exit</th>
+            <th class="num">Realized</th><th>Opened</th><th>Closed</th>
+          </tr></thead><tbody></tbody>
+        </table></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-symbols" hidden>
+    <div class="panel">
+      <div class="panel-h">Per-instrument breakdown</div>
+      <div class="panel-b" style="padding:0">
+        <div class="bt-scroll"><table class="bt-tbl" id="symtbl">
+          <thead><tr>
+            <th>Instrument</th><th class="num">Positions</th><th class="num">Won</th>
+            <th class="num">Win rate</th><th class="num">Realized</th>
+          </tr></thead><tbody></tbody>
+        </table></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-stats" hidden>
+    <div class="bt-grid c2">
+      <div class="panel">
+        <div class="panel-h">PnL statistics <span class="note" style="margin-left:8px">from the engine</span></div>
+        <div class="panel-b" style="padding:0">
+          <table class="bt-tbl" id="pnlstats"><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-h">Return statistics <span class="note" style="margin-left:8px">from the engine</span></div>
+        <div class="panel-b" style="padding:0">
+          <table class="bt-tbl" id="retstats"><tbody></tbody></table>
+        </div>
+      </div>
+    </div>
+    <p class="note" style="margin-top:12px">
+      Blank values are statistics the engine could not compute for this run
+      (e.g. Sharpe needs at least two return observations, loss metrics need at
+      least one losing trade). They are reported as empty rather than as zero.
+    </p>
+  </section>
+
+</div>
+
+<div id="toaststack" role="status" aria-live="polite" aria-atomic="false"
+     style="position:fixed;right:16px;bottom:16px;z-index:10000;display:flex;flex-direction:column;gap:8px;align-items:flex-end;pointer-events:none;"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const MODE = 'test';                         // backtest results live in the test Redis db
+const API = p => `/api/${MODE}/backtest/${p}`;
+
+let META = {}, STATS = {}, EQUITY = [], POS = {closed_positions: [], positions: []};
+
+/* ---- boot splash (same contract as backtrader: never allowed to stick) ---- */
+(function () {
+  const el = $('boot'); if (!el) return;
+  let done = false;
+  window.__bootDone = () => {
+    if (done) return; done = true;
+    const f = $('bootfill'); if (f) f.style.width = '100%';
+    const s = $('bootstep'); if (s) s.textContent = 'ready';
+    setTimeout(() => { el.classList.add('done'); setTimeout(() => el.remove(), 600); }, 180);
+  };
+  setTimeout(window.__bootDone, 2600);               // hard ceiling
+  window.addEventListener('error', window.__bootDone);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') window.__bootDone(); });
+})();
+
+function showToast(msg, kind) {
+  const t = document.createElement('div');
+  t.className = 'toast' + (kind === 'error' ? ' error' : '');
+  const m = document.createElement('span'); m.className = 't-msg'; m.textContent = msg;
+  t.appendChild(m);
+  $('toaststack').appendChild(t);
+  setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 280); }, 3400);
+}
+
+const fmtMoney = v => (v == null ? '—'
+  : (v < 0 ? '-' : '') + '$' + Math.abs(v).toLocaleString(undefined,
+      {minimumFractionDigits: 2, maximumFractionDigits: 2}));
+const fmtPct = v => v == null ? '—' : v.toFixed(2) + '%';
+const fmtNum = (v, d = 2) => v == null ? '—' : v.toLocaleString(undefined,
+  {minimumFractionDigits: d, maximumFractionDigits: d});
+const fmtTs = ms => !ms ? '—'
+  : new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
+const esc = s => String(s == null ? '' : s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/* ---- tabs ---- */
+const VIEWS = ['overview', 'positions', 'symbols', 'stats'];
+function switchView(v) {
+  VIEWS.forEach(x => { const s = $('view-' + x); if (s) s.hidden = (x !== v); });
+  document.querySelectorAll('nav button.tab').forEach(b =>
+    b.classList.toggle('active', b.dataset.view === v));
+  if (v === 'overview') requestAnimationFrame(drawCharts);
+}
+document.querySelectorAll('nav button.tab').forEach(b =>
+  b.onclick = () => switchView(b.dataset.view));
+
+/* ---- data ---- */
+async function loadAll() {
+  const get = async p => {
+    try {
+      const r = await fetch(API(p));
+      if (!r.ok) throw new Error(r.status);
+      return await r.json();
+    } catch (e) { return null; }
+  };
+  const [meta, stats, eq, pos] = await Promise.all(
+    [get('meta'), get('stats'), get('equity'), get('positions')]);
+  META = meta || {};
+  STATS = stats || {};
+  EQUITY = Array.isArray(eq) ? eq : [];
+  POS = pos || {closed_positions: [], positions: []};
+  render();
+  if (window.__bootDone) window.__bootDone();
+}
+
+function render() {
+  renderRibbon(); renderCards(); renderPositions(); renderSymbols(); renderStats();
+  requestAnimationFrame(drawCharts);
+}
+
+function netPnl() {
+  if (STATS && typeof STATS.final_nav === 'number' && STATS.starting_balance)
+    return STATS.final_nav - STATS.starting_balance;
+  const p = (META.pnl || {}).USDT;
+  return p ? (p.total != null ? p.total : p.realized) : null;
+}
+
+function renderRibbon() {
+  const st = META.status || 'none';
+  const cls = st === 'done' ? 'ok' : st === 'running' ? 'busy'
+            : st === 'error' ? 'bad' : '';
+  const set = (id, html, c) => {
+    const el = $(id); if (!el) return;
+    el.className = 'rb' + (c ? ' ' + c : '');
+    el.querySelector('b').innerHTML = html;
+  };
+  set('rb-status', esc(st), cls);
+  set('rb-strategy', esc(META.strategy || '—'), '');
+  set('rb-range', META.start_date && META.end_date
+    ? `${esc(META.start_date)} → ${esc(META.end_date)}`
+    : (META.days ? esc(META.days) + 'd' : '—'), '');
+  const nClosed = (POS.closed_positions || []).length;
+  set('rb-trades', String(nClosed || META.closed || 0), '');
+  const np = netPnl();
+  set('rb-pnl', np == null ? '—'
+    : `<span class="${np >= 0 ? 'pos' : 'neg'}">${fmtMoney(np)}</span>`, '');
+}
+
+function renderCards() {
+  const s = STATS || {};
+  const pnl = (s.pnl || {}).USDT || {};
+  const ret = s.returns || {};
+  const np = netPnl();
+  const winRate = pnl['Win Rate'] != null ? pnl['Win Rate'] * 100 : null;
+  const cards = [
+    ['Net PnL', fmtMoney(np), np == null ? '' : (np >= 0 ? 'pos' : 'neg')],
+    ['Return', s.return_pct == null ? '—' : fmtPct(s.return_pct),
+      s.return_pct == null ? '' : (s.return_pct >= 0 ? 'pos' : 'neg')],
+    ['Win rate', winRate == null ? '—' : fmtPct(winRate), ''],
+    ['Positions', String((s.totals || {}).positions ?? (POS.closed_positions || []).length), ''],
+    ['Max DD', s.max_drawdown_pct == null ? '—' : fmtPct(s.max_drawdown_pct),
+      s.max_drawdown_pct ? 'neg' : ''],
+    ['Sharpe', ret['Sharpe Ratio (252 days)'] == null ? '—'
+      : fmtNum(ret['Sharpe Ratio (252 days)']), ''],
+    ['Profit factor', ret['Profit Factor'] == null ? '—' : fmtNum(ret['Profit Factor']), ''],
+    ['Final NAV', s.final_nav == null ? '—' : fmtMoney(s.final_nav), ''],
+  ];
+  $('statcards').innerHTML = cards.map(([k, v, cls]) =>
+    `<div class="card"><div class="k">${esc(k)}</div>
+       <div class="v ${cls}">${v}</div></div>`).join('');
+}
+
+function renderPositions() {
+  const rows = (POS.closed_positions || []);
+  $('poscount').textContent = rows.length ? `${rows.length} closed` : '';
+  const tb = $('postbl2').querySelector('tbody');
+  if (!rows.length) {
+    tb.innerHTML = `<tr><td colspan="8">
+      <div class="emptybox"><div class="eb-mark">◇</div>
+        <div class="eb-t">No closed positions</div>
+        <div class="eb-s">Run a backtest from the live dashboard to populate this.</div>
+      </div></td></tr>`;
+    return;
+  }
+  tb.innerHTML = rows.map(p => {
+    const r = p.realized;
+    return `<tr>
+      <td>${esc(p.instrument)}</td>
+      <td><span class="side ${p.side === 'LONG' ? 'long' : 'short'}">${esc(p.side)}</span></td>
+      <td class="num">${fmtNum(p.qty, 4)}</td>
+      <td class="num">${fmtNum(p.avg_px_open, 4)}</td>
+      <td class="num">${fmtNum(p.avg_px_close, 4)}</td>
+      <td class="num ${r >= 0 ? 'pos' : 'neg'}">${fmtMoney(r)}</td>
+      <td>${fmtTs(p.ts_opened)}</td>
+      <td>${fmtTs(p.ts_closed)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderSymbols() {
+  const agg = {};
+  for (const p of (POS.closed_positions || [])) {
+    const a = agg[p.instrument] || (agg[p.instrument] = {n: 0, won: 0, pnl: 0});
+    a.n++; a.pnl += (p.realized || 0);
+    if ((p.realized || 0) > 0) a.won++;
+  }
+  const rows = Object.entries(agg).sort((a, b) => b[1].pnl - a[1].pnl);
+  const tb = $('symtbl').querySelector('tbody');
+  if (!rows.length) {
+    tb.innerHTML = `<tr><td colspan="5"><div class="emptybox">
+      <div class="eb-mark">◇</div><div class="eb-t">Nothing to break down yet</div></div></td></tr>`;
+    return;
+  }
+  tb.innerHTML = rows.map(([inst, a]) => `<tr>
+    <td>${esc(inst)}</td>
+    <td class="num">${a.n}</td>
+    <td class="num">${a.won}</td>
+    <td class="num">${fmtPct(a.n ? a.won / a.n * 100 : 0)}</td>
+    <td class="num ${a.pnl >= 0 ? 'pos' : 'neg'}">${fmtMoney(a.pnl)}</td>
+  </tr>`).join('');
+}
+
+function renderStats() {
+  const s = STATS || {};
+  const pnl = (s.pnl || {}).USDT || {};
+  const ret = s.returns || {};
+  const fmtStat = (k, v) => {
+    if (v == null) return '<span class="note">—</span>';
+    if (/rate|%/i.test(k)) return fmtPct(k.includes('%') ? v : v * 100);
+    return fmtNum(v, 4);
+  };
+  const body = obj => Object.keys(obj).length
+    ? Object.entries(obj).map(([k, v]) =>
+        `<tr><td>${esc(k)}</td><td class="num">${fmtStat(k, v)}</td></tr>`).join('')
+    : `<tr><td colspan="2"><span class="note">no statistics for this run</span></td></tr>`;
+  $('pnlstats').querySelector('tbody').innerHTML = body(pnl);
+  $('retstats').querySelector('tbody').innerHTML = body(ret);
+}
+
+/* ---- charts (plain canvas, no chart lib — matches the dashboard's approach) ---- */
+function cssVar(n) { return getComputedStyle(document.documentElement)
+  .getPropertyValue(n).trim() || '#888'; }
+
+function sizeCanvas(cv) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.parentElement.clientWidth || 600;
+  const h = parseInt(cv.getAttribute('height'), 10) || 240;
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  cv.style.width = w + 'px'; cv.style.height = h + 'px';
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return {ctx, w, h};
+}
+
+function drawCharts() {
+  drawEquity();
+  drawDrawdown();
+}
+
+function drawSeries(cv, pts, opts) {
+  const {ctx, w, h} = sizeCanvas(cv);
+  ctx.clearRect(0, 0, w, h);
+  const padL = 58, padR = 12, padT = 12, padB = 24;
+  const iw = Math.max(1, w - padL - padR), ih = Math.max(1, h - padT - padB);
+  const grid = cssVar('--border'), muted = cssVar('--muted');
+
+  if (!pts.length) {
+    ctx.fillStyle = cssVar('--faint');
+    ctx.font = '12px system-ui, sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('no equity data — run a backtest first', w / 2, h / 2);
+    return;
+  }
+  let mn = Infinity, mx = -Infinity;
+  for (const p of pts) { if (p.v < mn) mn = p.v; if (p.v > mx) mx = p.v; }
+  if (opts.zeroFloor) mn = Math.min(0, mn);
+  if (mn === mx) { mn -= 1; mx += 1; }
+  const pad = (mx - mn) * 0.08; mn -= pad; mx += pad;
+  const t0 = pts[0].t, t1 = pts[pts.length - 1].t || (t0 + 1);
+  const X = t => padL + ((t - t0) / Math.max(1, t1 - t0)) * iw;
+  const Y = v => padT + (1 - (v - mn) / (mx - mn)) * ih;
+
+  // gridlines + y labels
+  ctx.strokeStyle = grid; ctx.fillStyle = muted;
+  ctx.lineWidth = 1; ctx.font = '10px system-ui, sans-serif'; ctx.textAlign = 'right';
+  for (let i = 0; i <= 4; i++) {
+    const v = mn + (mx - mn) * (i / 4), y = Math.round(Y(v)) + .5;
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - padR, y); ctx.stroke();
+    ctx.fillText(opts.fmtY ? opts.fmtY(v) : v.toFixed(0), padL - 7, y + 3);
+  }
+  // x labels
+  ctx.textAlign = 'center';
+  for (let i = 0; i <= 3; i++) {
+    const t = t0 + (t1 - t0) * (i / 3);
+    ctx.fillText(new Date(t).toISOString().slice(5, 10), X(t), h - 7);
+  }
+  // area + line
+  const col = opts.color;
+  const g = ctx.createLinearGradient(0, padT, 0, padT + ih);
+  g.addColorStop(0, opts.fill); g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.beginPath();
+  pts.forEach((p, i) => i ? ctx.lineTo(X(p.t), Y(p.v)) : ctx.moveTo(X(p.t), Y(p.v)));
+  ctx.lineTo(X(pts[pts.length - 1].t), padT + ih);
+  ctx.lineTo(X(pts[0].t), padT + ih); ctx.closePath();
+  ctx.fillStyle = g; ctx.fill();
+  ctx.beginPath();
+  pts.forEach((p, i) => i ? ctx.lineTo(X(p.t), Y(p.v)) : ctx.moveTo(X(p.t), Y(p.v)));
+  ctx.strokeStyle = col; ctx.lineWidth = 1.6; ctx.stroke();
+}
+
+function drawEquity() {
+  const pts = EQUITY.map(p => ({t: p.ts, v: p.nav})).filter(p => p.v != null);
+  const up = pts.length > 1 && pts[pts.length - 1].v >= pts[0].v;
+  drawSeries($('eqcanvas'), pts, {
+    color: up ? cssVar('--green') : cssVar('--red'),
+    fill: up ? 'rgba(63,185,80,.18)' : 'rgba(248,81,73,.18)',
+    fmtY: v => '$' + Math.round(v).toLocaleString(),
+  });
+}
+
+function drawDrawdown() {
+  let peak = null;
+  const pts = EQUITY.filter(p => p.nav != null).map(p => {
+    peak = peak == null ? p.nav : Math.max(peak, p.nav);
+    return {t: p.ts, v: peak > 0 ? -((peak - p.nav) / peak * 100) : 0};
+  });
+  drawSeries($('ddcanvas'), pts, {
+    color: cssVar('--red'), fill: 'rgba(248,81,73,.16)',
+    zeroFloor: true, fmtY: v => v.toFixed(1) + '%',
+  });
+}
+
+let _rz;
+window.addEventListener('resize', () => {
+  clearTimeout(_rz); _rz = setTimeout(drawCharts, 120);
+});
+
+$('refreshbtn').onclick = async () => {
+  const b = $('refreshbtn'); b.disabled = true; b.textContent = 'Loading…';
+  try { await loadAll(); showToast('Results refreshed'); }
+  catch (e) { showToast('Refresh failed: ' + (e.message || e), 'error'); }
+  finally { b.disabled = false; b.textContent = 'Refresh'; }
+};
+
+loadAll();
+// A run in progress is worth following without manual refreshing.
+setInterval(() => { if ((META.status || '') === 'running') loadAll(); }, 4000);
+</script>
+</body>
+</html>

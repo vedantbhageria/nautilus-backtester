@@ -1,364 +1,294 @@
-import os
+"""Trading node: Binance market data, sandbox execution, dashboard control.
+
+Run via launch.bat (or `.venv\\Scripts\\python.exe scripts\\binance_data.py`).
+
+Strategy commands arrive on the ``dashboard:strategy_cmds`` Redis stream. Each is
+executed on the node's event loop and answered with a notification carrying the
+command's id: success with what happened, or an error with the reason and a
+Retry payload. Nothing is written optimistically; the dashboard shows the state
+each strategy actually reports (``DashboardStrategy.status``).
+"""
 import csv
 import json
-import time
+import os
 import threading
-from datetime import datetime, timezone, timedelta
+import time
+import traceback
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+
 import redis
-import redis as syncredis
-from dotenv import load_dotenv
-from nautilus_trader.live.node import TradingNode
 from nautilus_trader.adapters.binance import BinanceLiveDataClientFactory
-from nautilus_trader.adapters.binance import BinanceLiveExecClientFactory
 from nautilus_trader.adapters.sandbox.factory import SandboxLiveExecClientFactory
-from nautilus_trader.model.data import BarType
+from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.examples.algorithms.twap import TWAPExecAlgorithm
 
-from trading.configs.binance_config import config_node, BINANCE_SPOT, BINANCE_FUTURES
-from trading.actors.control_actor import ControlActor, ControlActorConfig
-from trading.strategies.EMACross import EMACross, EMACrossConfig
-from trading.strategies.EMACrossShortTest import EMACrossStopReverse, EMACrossSARConfig
-from trading.strategies.fixed_positions import FixedNotional, FixedNotionalConfig, STRATEGY_SET
 from backtest_runner import run_backtest
+from trading import redis_io as K
+from trading.actors.control_actor import ControlActor, ControlActorConfig
+from trading.configs.binance_config import BINANCE_FUTURES, BINANCE_SPOT, config_node
+from trading.strategies.EMACross import EMACross, EMACrossConfig
+from trading.strategies.EMACrossShortTest import EMACrossSARConfig, EMACrossStopReverse
 
-load_dotenv()
-REDIS_URL = os.getenv("LIVE_REDIS_URL", os.getenv("REDIS_URL", "redis://localhost:6379/0"))
-TEST_REDIS_URL = os.getenv("TEST_REDIS_URL", "redis://localhost:6379/1")
-STRATEGY_CMDS_STREAM = "dashboard:strategy_cmds"
-
-_strats: dict[str, object] = {}   # str(strategy.id) -> Strategy instance
-_stop_event = threading.Event()
-
-
-STRATEGY_STATES_KEY = "dashboard:strategy_states"
-STRATEGY_MODES_KEY  = "dashboard:strategy_modes"   # strategy_id -> "live" | "test"
-PORTFOLIO_KEY = "dashboard:portfolio"
 EXPORT_DIR = os.getenv("POSITION_EXPORT_DIR", "exports")
+_IST = timezone(timedelta(hours=5, minutes=30))
 
 
-def _iso(ms):
-    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat() if ms else ""
+def perps(symbols):
+    return tuple(InstrumentId.from_str(f"{s}-PERP.{BINANCE_FUTURES}") for s in symbols)
 
 
-def _export_positions_csv(r, sid, mode="live"):
-    try:
-        raw = r.get(PORTFOLIO_KEY)
-        snap = json.loads(raw) if raw else {}
-        open_ = [p for p in snap.get("positions", []) if p.get("strategy") == sid]
-        closed = [p for p in snap.get("closed_positions", []) if p.get("strategy") == sid]
-        # For test mode, merge in the backtest engine's closed positions from DB 1.
-        if mode == "test":
-            try:
-                rr = syncredis.Redis.from_url(TEST_REDIS_URL, decode_responses=True)
-                bt_raw = rr.get("dashboard:backtest:positions")
-                rr.close()
-                if bt_raw:
-                    bt = json.loads(bt_raw)
-                    existing = {p.get("id") for p in closed}
-                    for p in bt.get("closed_positions", []):
-                        if p.get("id") not in existing:
-                            closed.append(p)
-                    for p in bt.get("positions", []):
-                        if p.get("id") not in existing:
-                            open_.append(p)
-            except Exception as e:
-                print(f"[export] backtest merge failed: {e}")
-        if not open_ and not closed:
-            print(f"[export] no positions found for {sid}")
-        os.makedirs(EXPORT_DIR, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        path = os.path.join(EXPORT_DIR, f"positions_{sid}_{ts}.csv")
-        def _ist(ms):
-            if not ms: return ""
-            return (datetime.fromisoformat(_iso(ms).replace("Z", "")) + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
-        def _hold(a, b):
-            if not a or not b: return ""
-            s = int((b - a) / 1000)
-            m = s // 60
-            return f"{m}m {s % 60}s" if m else f"{s}s"
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(["symbol", "strategy", "side", "qty", "entry", "exit",
-                        "entry_px", "exit_px", "pnl", "ccy", "hold"])
-            for p in closed:
-                w.writerow([
-                    p.get("instrument", "").split(".")[0],
-                    (p.get("strategy") or "").split("-None")[0],
-                    p.get("side"), p.get("qty"),
-                    _ist(p.get("ts_opened")), _ist(p.get("ts_closed")),
-                    p.get("avg_px_open"), p.get("avg_px_close"),
-                    p.get("realized"), p.get("ccy"),
-                    _hold(p.get("ts_opened"), p.get("ts_closed")),
-                ])
-                
-        print(f"[export] wrote {len(closed)} closed + {len(open_)} open positions to {path}")
-    except Exception as e:
-        print(f"[export] failed for {sid}: {e}")
+# Top-20 USDT perpetuals by open interest.
+PERP_INSTRUMENTS = perps([
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT",
+    "LINKUSDT", "SUIUSDT", "DOTUSDT", "NEARUSDT", "APTUSDT", "LTCUSDT", "UNIUSDT", "ATOMUSDT",
+    "INJUSDT", "AAVEUSDT", "ARBUSDT", "RENDERUSDT",
+])
+
+PERP_INSTRUMENTS_SAR = perps([
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT", "TRXUSDT", "HYPEUSDT", "DOGEUSDT", "ZECUSDT",
+    "LABUSDT", "XLMUSDT", "XMRUSDT", "CCUSDT", "LINKUSDT", "ADAUSDT", "BCHUSDT", "LTCUSDT", "HBARUSDT",
+    "SUIUSDT", "AVAXUSDT", "1000SHIBUSDT", "NEARUSDT", "TAOUSDT", "WLFIUSDT", "PAXGUSDT", "UNIUSDT",
+    "ASTERUSDT", "WLDUSDT", "ONDOUSDT", "DOTUSDT", "AAVEUSDT", "SKYUSDT", "MUSDT", "ETCUSDT",
+    "MORPHOUSDT", "DEXEUSDT", "1000PEPEUSDT", "QNTUSDT", "ATOMUSDT", "RENDERUSDT", "POLUSDT", "KASUSDT",
+    "ALGOUSDT", "ENAUSDT", "JUPUSDT", "JSTUSDT", "BEATUSDT", "VVVUSDT", "FILUSDT", "NIGHTUSDT", "APTUSDT",
+    "ARBUSDT", "AEROUSDT", "INJUSDT", "DASHUSDT", "CAKEUSDT", "TRUMPUSDT", "VETUSDT", "FETUSDT",
+    "PENGUUSDT", "SEIUSDT", "JTOUSDT", "1000BONKUSDT", "1000LUNCUSDT", "ETHFIUSDT", "VIRTUALUSDT",
+    "KITEUSDT", "TIAUSDT", "SUNUSDT", "SKYAIUSDT", "STXUSDT", "SPXUSDT", "CRVUSDT", "XPLUSDT", "GRASSUSDT",
+    "GWEIUSDT", "PYTHUSDT", "XTZUSDT", "OPUSDT", "MONUSDT", "CFXUSDT", "JASMYUSDT", "BSVUSDT", "BUSDT",
+    "1000FLOKIUSDT", "PENDLEUSDT", "VELVETUSDT", "LDOUSDT", "ZROUSDT", "KAIAUSDT", "AKTUSDT", "GRTUSDT",
+    "STRKUSDT", "CHZUSDT", "UBUSDT", "AXSUSDT", "IOTAUSDT", "ENSUSDT", "EIGENUSDT", "COMPUSDT",
+])
+
+# strategy_id is the name and order_id_tag the suffix; the StrategyId is
+# "{strategy_id}-{order_id_tag}". Tags must be unique: without them Nautilus
+# silently renamed "EMACross-001" to "EMACross-000" at registration.
+STRATEGIES = [
+    EMACross(EMACrossConfig(
+        strategy_id="EMACross", order_id_tag="000",
+        instrument_ids=PERP_INSTRUMENTS, trade_usd=Decimal("2000"),
+        bar_spec="5-SECOND-LAST", fast_ema_period=5, slow_ema_period=10,
+    )),
+    EMACrossStopReverse(EMACrossSARConfig(
+        strategy_id="EMACrossStop&Reverse", order_id_tag="001",
+        instrument_ids=PERP_INSTRUMENTS_SAR, trade_usd=Decimal("2000"),
+        bar_spec="1-MINUTE-LAST", fast_ema_period=60, slow_ema_period=120,
+    )),
+]
+
+def refuse_if_another_node_running() -> None:
+    """Two nodes on one Redis both obey every strategy command and interleave
+    their orders, positions and status on the dashboard. Refuse to be second."""
+    hb = K.read_json(K.connect(), K.HEARTBEAT)
+    if hb and time.time() - hb["ts"] / 1000 < 15 and hb.get("pid") != os.getpid():
+        raise SystemExit(
+            f"[node] REFUSING TO START: another trading node (pid {hb.get('pid')}) is already running "
+            f"against this Redis (heartbeat {time.time() - hb['ts'] / 1000:.0f}s ago). Stop it first.")
 
 
-def _safe_call(fn, label):
-    def wrapper():
-        try:
-            fn()
-        except Exception as e:
-            print(f"[strategy_manager] {label} raised: {e}")
-    return wrapper
-
-
-def _arm(strat):
-    return lambda: setattr(strat, "_active", True)
-
-
-def _disarm(strat):
-    return lambda: setattr(strat, "_active", False)
-
-
-def _cancel_all(strat):
-    # Cancel every open order for this strategy (cancel_all_orders needs a
-    # per-instrument id, so iterate the strategy's open orders from the cache).
-    def fn():
-        for o in list(strat.cache.orders_open(strategy_id=strat.id)):
-            strat.cancel_order(o)
-    return fn
-
-
-def _close_all(strat):
-    # Close every open position for this strategy (close_all_positions needs a
-    # per-instrument id, so iterate the strategy's open positions from the cache).
-    def fn():
-        for p in list(strat.cache.positions_open(strategy_id=strat.id)):
-            strat.close_position(p)
-    return fn
-
-
-def _strategy_manager(loop):
-    r = syncredis.Redis.from_url(REDIS_URL, decode_responses=True)
-    cursor = "$"
-    # Strategies auto-start with the node. We want them OFF until the user
-    # presses Start, so stop each one the instant it reaches RUNNING.
-
-    to_stop = set(_strats.keys())
-    print(f"[strategy_manager] started, watching {STRATEGY_CMDS_STREAM!r}, strats={list(_strats.keys())}")
-    while not _stop_event.is_set():
-        try:
-            for sid in list(to_stop):
-                strat = _strats[sid]
-                if strat.is_running:
-                    loop.call_soon_threadsafe(_safe_call(strat.stop, f"initial-stop({sid})"))
-                    r.hset(STRATEGY_STATES_KEY, sid, "STOPPED")
-                    to_stop.discard(sid)
-                    print(f"[strategy_manager] auto-stopped {sid} on startup")
-            block_ms = 100 if to_stop else 1000
-            results = r.xread({STRATEGY_CMDS_STREAM: cursor}, count=10, block=block_ms)
-            if not results:
-                continue
-            _, entries = results[0]
-            for eid, fields in entries:
-                cursor = eid
-                action = fields.get("action")
-                sid = fields.get("strategy_id")
-                print(f"[strategy_manager] received action={action!r} strategy_id={sid!r}")
-                strat = _strats.get(sid)
-                if not strat:
-                    print(f"[strategy_manager] unknown strategy_id={sid!r}, known={list(_strats.keys())}")
-                    continue
-                try:
-                    if action == "stop_strategy":
-                        loop.call_soon_threadsafe(_disarm(strat))
-                        loop.call_soon_threadsafe(_safe_call(_cancel_all(strat), f"cancel-orders({sid})"))
-                        loop.call_soon_threadsafe(_safe_call(strat.stop, f"stop({sid})"))
-                        r.hset(STRATEGY_STATES_KEY, sid, "STOPPED")
-                        print(f"[strategy_manager] stop scheduled for {sid}")
-                    elif action == "start_strategy":
-                        r.hset(STRATEGY_MODES_KEY, sid, "live")
-                        loop.call_soon_threadsafe(_arm(strat))
-                        loop.call_soon_threadsafe(_safe_call(strat.reset, f"reset({sid})"))
-                        loop.call_soon_threadsafe(_safe_call(strat.start, f"start({sid})"))
-                        r.hset(STRATEGY_STATES_KEY, sid, "RUNNING")
-                        print(f"[strategy_manager] start scheduled for {sid}")
-                    elif action == "export_csv":
-                        _export_positions_csv(r, sid, mode=fields.get("mode", "live"))
-                        print(f"[strategy_manager] CSV exported for {sid}")
-                    elif action in ("backtest_strategy", "start_test_strategy"):
-                        start_date = fields.get("start_date") or None
-                        end_date   = fields.get("end_date")   or None
-                        r.hset(STRATEGY_MODES_KEY, sid, "test")
-                        do_live = (action == "start_test_strategy" and not end_date)
-                        print(f"[strategy_manager] backtest queued for {sid} start={start_date} end={end_date} live_handoff={do_live}")
-                        # Run BacktestEngine for historical positions/PnL/chart bars
-                        # using our throttled _fetch_klines (not Nautilus HTTP client).
-                        # After it finishes, optionally start the live strategy with
-                        # the normal short EMA warmup (slow_ema * 2 bars only).
-                        def _run_bt(sid=sid, strat=strat, sd=start_date, ed=end_date, live=do_live):
-                            rr = syncredis.Redis.from_url(TEST_REDIS_URL, decode_responses=True)
-                            try:
-                                insts = [node.cache.instrument(iid)
-                                         for iid in strat.config.instrument_ids]
-                                insts = [i for i in insts if i is not None]
-                                run_backtest(rr, strat, insts, start_date=sd, end_date=ed)
-                                if live:
-                                    # Hand off to live: short warmup only (slow_ema*2
-                                    # bars via Nautilus HTTP, well within rate limits).
-                                    loop.call_soon_threadsafe(_arm(strat))
-                                    loop.call_soon_threadsafe(
-                                        _safe_call(strat.reset, f"handoff-reset({sid})"))
-                                    loop.call_soon_threadsafe(
-                                        _safe_call(strat.start, f"handoff-start({sid})"))
-                                    rr.hset(STRATEGY_STATES_KEY, sid, "RUNNING")
-                                    print(f"[strategy_manager] live handoff started for {sid}")
-                            finally:
-                                rr.close()
-                        threading.Thread(target=_run_bt, daemon=True).start()
-                        print(f"[strategy_manager] backtest thread started for {sid}")
-                    elif action == "close_strategy":
-                        loop.call_soon_threadsafe(_disarm(strat))
-                        loop.call_soon_threadsafe(_safe_call(_cancel_all(strat), f"cancel-orders({sid})"))
-                        loop.call_soon_threadsafe(_safe_call(_close_all(strat), f"close_all({sid})"))
-                        r.hset(STRATEGY_STATES_KEY, sid, "STOPPED")
-                        print(f"[strategy_manager] close scheduled for {sid}")
-                        # Retry close until all positions fill; then export CSV and stop.
-                        def _drain_and_stop(strat=strat, sid=sid, r=r):
-                            for _ in range(30):
-                                time.sleep(1)
-                                remaining = strat.cache.positions_open(strategy_id=strat.id)
-                                if not remaining:
-                                    break
-                                loop.call_soon_threadsafe(
-                                    _safe_call(_close_all(strat), f"retry-close({sid})")
-                                )
-                            mode_tag = r.hget(STRATEGY_MODES_KEY, sid) or "live"
-                            _export_positions_csv(r, sid, mode=mode_tag)
-                            loop.call_soon_threadsafe(_safe_call(strat.stop, f"stop({sid})"))
-                            print(f"[strategy_manager] all positions closed, stopped {sid}")
-                        threading.Thread(target=_drain_and_stop, daemon=True).start()
-                except Exception as e:
-                    print(f"[strategy_manager] error scheduling {action} for {sid}: {e}")
-        except Exception as e:
-            print(f"[strategy_manager] poll error: {e}")
-            time.sleep(0.5)
+if __name__ == "__main__":
+    refuse_if_another_node_running()
 
 node = TradingNode(config_node)
-
-# Top 20 most popular USDT-margined perpetual futures on Binance by open interest.
-_PERP_SYMS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-    "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "SUIUSDT",
-    "DOTUSDT", "NEARUSDT", "APTUSDT", "LTCUSDT", "UNIUSDT",
-    "ATOMUSDT", "INJUSDT", "AAVEUSDT", "ARBUSDT", "RENDERUSDT",
-]
-PERP_INSTRUMENTS = tuple(
-    InstrumentId.from_str(f"{sym}-PERP.{BINANCE_FUTURES}")
-    for sym in _PERP_SYMS
-)
-
-_PERP_SYMS_STOP_REVERSES = [
-    "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT",
-    "TRXUSDT", "HYPEUSDT", "DOGEUSDT", "ZECUSDT", "LABUSDT",
-    "XLMUSDT", "XMRUSDT", "CCUSDT", "LINKUSDT", "ADAUSDT",
-    "BCHUSDT", "LTCUSDT", "HBARUSDT", "SUIUSDT", "AVAXUSDT",
-    "1000SHIBUSDT", "NEARUSDT", "TAOUSDT", "WLFIUSDT", "PAXGUSDT",
-    "UNIUSDT", "ASTERUSDT", "WLDUSDT", "ONDOUSDT", "DOTUSDT",
-    "AAVEUSDT", "SKYUSDT", "MUSDT", "ETCUSDT", "MORPHOUSDT",
-    "DEXEUSDT", "1000PEPEUSDT", "QNTUSDT", "ATOMUSDT", "RENDERUSDT",
-    "POLUSDT", "KASUSDT", "ALGOUSDT", "ENAUSDT", "JUPUSDT",
-    "JSTUSDT", "BEATUSDT", "VVVUSDT", "FILUSDT", "NIGHTUSDT",
-    "APTUSDT", "ARBUSDT", "AEROUSDT", "INJUSDT", "DASHUSDT",
-    "CAKEUSDT", "TRUMPUSDT", "VETUSDT", "FETUSDT", "PENGUUSDT",
-    "SEIUSDT", "JTOUSDT", "1000BONKUSDT", "1000LUNCUSDT", "ETHFIUSDT",
-    "VIRTUALUSDT", "KITEUSDT", "TIAUSDT", "SUNUSDT", "SKYAIUSDT",
-    "STXUSDT", "SPXUSDT", "CRVUSDT", "XPLUSDT", "GRASSUSDT",
-    "GWEIUSDT", "PYTHUSDT", "XTZUSDT", "OPUSDT", "MONUSDT",
-    "CFXUSDT", "JASMYUSDT", "BSVUSDT", "BUSDT", "1000FLOKIUSDT",
-    "PENDLEUSDT", "VELVETUSDT", "LDOUSDT", "ZROUSDT", "KAIAUSDT",
-    "AKTUSDT", "GRTUSDT", "STRKUSDT", "CHZUSDT", "UBUSDT",
-    "AXSUSDT", "IOTAUSDT", "ENSUSDT", "EIGENUSDT", "COMPUSDT",
-]
-
-PERP_INSTRUMENTS_SAR = tuple(
-    InstrumentId.from_str(f"{sym}-PERP.{BINANCE_FUTURES}")
-    for sym in _PERP_SYMS_STOP_REVERSES
-)
-
-node.trader.add_actor(ControlActor(ControlActorConfig()))
-
-# _fn = FixedNotional(FixedNotionalConfig(
-#     strategy_id="FixedNotional-001",
-#     instrument_ids=PERP_INSTRUMENTS,
-#     target_usd=Decimal("2000"),
-#     rebalance_threshold=0.001,
-# ))
-# node.trader.add_strategy(_fn)
-# _strats[str(_fn.id)] = _fn
-# print(f"[binance_data] strategy registered: id={_fn.id!r}")
-
-_ema = EMACross(EMACrossConfig(
-    strategy_id="EMACross-001",
-    instrument_ids=PERP_INSTRUMENTS,
-    trade_usd=Decimal("2000"),
-    bar_spec="5-SECOND-LAST",   # 5-second bars per instrument
-    fast_ema_period=5,  #60 180
-    slow_ema_period=10,
-))
-_ema_SAR = EMACrossStopReverse(EMACrossSARConfig(
-    strategy_id="EMACrossStop&Reverse-001",
-    instrument_ids=PERP_INSTRUMENTS_SAR,
-    trade_usd=Decimal("2000"),
-    bar_spec="1-MINUTE-LAST",   # 5-second bars per instrument
-    fast_ema_period=60,  
-    slow_ema_period=120,
-))
-
-node.trader.add_strategy(_ema)
-node.trader.add_strategy(_ema_SAR)
-_strats[str(_ema.id)] = _ema
-_strats[str(_ema_SAR.id)] = _ema_SAR
-
-print(f"[binance_data] strategy registered: id={_ema.id!r}")
-print(f"[binance_data] strategy registered: id={_ema_SAR.id!r}")
-
-#exec_algorithm = TWAPExecAlgorithm()
-#node.trader.add_exec_algorithm(exec_algorithm)
-
+control = ControlActor(ControlActorConfig(venue=BINANCE_FUTURES, sandbox=True))
+control.strategies = STRATEGIES
+node.trader.add_actor(control)
+for s in STRATEGIES:
+    node.trader.add_strategy(s)
+STRATS = {str(s.id): s for s in STRATEGIES}
+for sid, s in STRATS.items():
+    print(f"[node] strategy registered: {sid} ({len(s.config.instrument_ids)} instruments, {s.config.bar_spec})")
 
 for name in (BINANCE_SPOT, BINANCE_FUTURES):
     node.add_data_client_factory(name, BinanceLiveDataClientFactory)
 node.add_exec_client_factory(BINANCE_FUTURES, SandboxLiveExecClientFactory)
-
 node.build()
 
-# Write initial RUNNING state for all registered strategies.
 
-"""
-_r = syncredis.Redis.from_url(REDIS_URL, decode_responses=True)
-for _sid in _strats:
-    _r.hset(STRATEGY_STATES_KEY, _sid, "RUNNING")
-_r.close()
-"""
+# ---------------------------------------------------------------------------
+# position export
+# ---------------------------------------------------------------------------
 
-OVERALL_PNL_KEY = "dashboard:overall_pnl"
+def export_positions_csv(r, sid: str, mode: str) -> str:
+    snap = K.read_json(r, K.PORTFOLIO, {}) or {}
+    ledger = K.read_json(r, K.CLOSED_POSITIONS, {}) or {}
+    open_ = [p for p in snap.get("positions", []) if p.get("strategy") == sid]
+    closed = [c for c in ledger.values() if c.get("strategy") == sid]
+    if mode == "test":
+        bt = K.read_json(K.connect(K.test_url()), f"{K.BACKTEST}:positions", {}) or {}
+        seen = {c.get("id") for c in closed}
+        closed += [c for c in bt.get("closed_positions", []) if c.get("id") not in seen]
+    closed.sort(key=lambda c: c.get("ts_closed", 0))
+
+    def ist(ms):
+        return datetime.fromtimestamp(ms / 1000, tz=_IST).strftime("%Y-%m-%d %H:%M:%S") if ms else ""
+
+    def hold(a, b):
+        if not a or not b:
+            return ""
+        s = int((b - a) / 1000)
+        return f"{s // 60}m {s % 60}s" if s >= 60 else f"{s}s"
+
+    os.makedirs(EXPORT_DIR, exist_ok=True)
+    path = os.path.join(EXPORT_DIR, f"positions_{sid.replace('&', 'and')}_{datetime.now():%Y%m%d-%H%M%S}.csv")
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["status", "symbol", "strategy", "side", "qty", "entry", "exit",
+                    "entry_px", "exit_px", "pnl", "ccy", "hold"])
+        for p in closed:
+            w.writerow(["closed", p.get("instrument", "").split(".")[0], sid, p.get("side"), p.get("qty"),
+                        ist(p.get("ts_opened")), ist(p.get("ts_closed")), p.get("avg_px_open"),
+                        p.get("avg_px_close"), p.get("realized"), p.get("ccy"),
+                        hold(p.get("ts_opened"), p.get("ts_closed"))])
+        for p in open_:
+            w.writerow(["open", p.get("instrument", "").split(".")[0], sid, p.get("side"), p.get("qty"),
+                        ist(p.get("ts_opened")), "", p.get("avg_px"), p.get("mark"),
+                        p.get("unrealized"), p.get("ccy"), ""])
+    return f"{len(closed)} closed + {len(open_)} open position(s) -> {os.path.abspath(path)}"
+
+
+# ---------------------------------------------------------------------------
+# command dispatcher
+# ---------------------------------------------------------------------------
+
+class Dispatcher:
+    """Reads strategy commands from Redis on its own thread; runs them on the
+    node's event loop (Nautilus objects are not thread-safe) and replies."""
+
+    def __init__(self, loop):
+        self.loop = loop
+        self.r = K.connect()
+        self.stop = threading.Event()
+        self.backtest_lock = threading.Lock()
+
+    def reply(self, level, title, detail="", cmd=None, retry=False):
+        cmd = cmd or {}
+        sid = cmd.get("strategy_id", "")
+        payload = K.strategy_retry(sid, cmd.get("action", ""), cmd.get("mode", "live"),
+                                   **{k: v for k, v in cmd.items()
+                                      if k not in ("action", "strategy_id", "mode", "cmd_id")}) if retry else None
+        K.notify(self.r, level, f"strategy:{sid}" if sid else "node", title, detail,
+                 retry=payload, key=f"cmd:{cmd.get('action')}:{sid}", cmd_id=cmd.get("cmd_id", ""))
+
+    def on_loop(self, cmd, fn, label):
+        """Run fn() on the event loop; reply with its message or the error."""
+        def run():
+            try:
+                msg = fn()
+                self.reply("success", f"{label}: {msg}", cmd=cmd)
+            except Exception as e:
+                traceback.print_exc()
+                self.reply("error", f"{label} failed", f"{type(e).__name__}: {e}", cmd=cmd, retry=True)
+        self.loop.call_soon_threadsafe(run)
+
+    def run(self):
+        cursor = "$"
+        print(f"[dispatcher] listening on {K.STRATEGY_CMDS}")
+        outage = None
+        while not self.stop.is_set():
+            try:
+                res = self.r.xread({K.STRATEGY_CMDS: cursor}, count=20, block=1000)
+                if outage is not None:
+                    print(f"[dispatcher] redis back after {time.time() - outage:.0f}s")
+                    outage = None
+            except redis.RedisError as e:
+                if outage is None:
+                    outage = time.time()
+                    print(f"[dispatcher] redis unavailable ({e}); retrying")
+                time.sleep(1)
+                continue
+            for eid, fields in (res[0][1] if res else []):
+                cursor = eid
+                try:
+                    self.handle(eid, dict(fields))
+                except Exception as e:
+                    traceback.print_exc()
+                    self.reply("error", f"Command '{fields.get('action')}' crashed", str(e), cmd=fields, retry=True)
+
+    def handle(self, eid: str, cmd: dict):
+        action, sid = cmd.get("action"), cmd.get("strategy_id")
+        age = time.time() - int(eid.split("-")[0]) / 1000
+        print(f"[dispatcher] {action} {sid} (age {age:.1f}s, id {cmd.get('cmd_id')})")
+        if age > K.STALE_COMMAND_S:
+            # Queued while the node or Redis was down: acting on it now could
+            # start trading hours after the click.
+            self.reply("warn", f"Ignored stale '{action}' command",
+                       f"Sent {age:.0f}s ago while the node was unreachable. Retry if you still want it.",
+                       cmd=cmd, retry=True)
+            return
+        strat = STRATS.get(sid)
+        if strat is None:
+            self.reply("error", f"Unknown strategy '{sid}'", f"Running strategies: {', '.join(STRATS)}", cmd=cmd)
+            return
+        mode = cmd.get("mode", "live")
+        if action == "start_strategy":
+            self.r.hset(K.STRATEGY_MODES, sid, "live" if mode != "test" else "test")
+            self.on_loop(cmd, strat.arm, f"Started {sid}")
+        elif action == "stop_strategy":
+            self.on_loop(cmd, strat.disarm, f"Paused {sid}")
+        elif action == "close_strategy":
+            strat.after_close_all = lambda: self.reply(
+                "success", f"Exported {sid}", export_positions_csv(self.r, sid, mode), cmd=cmd)
+            self.on_loop(cmd, strat.close_all, f"Close-all {sid}")
+        elif action == "rewarm":
+            self.on_loop(cmd, strat.rewarm, f"Re-warm {sid}")
+        elif action == "export_csv":
+            try:
+                self.reply("success", f"Exported {sid}", export_positions_csv(self.r, sid, mode), cmd=cmd)
+            except Exception as e:
+                self.reply("error", f"Export for {sid} failed", f"{type(e).__name__}: {e}", cmd=cmd, retry=True)
+        elif action == "start_test_strategy":
+            self.start_test(cmd, strat)
+        else:
+            self.reply("error", f"Unknown action '{action}'", cmd=cmd)
+
+    def start_test(self, cmd, strat):
+        sid = str(strat.id)
+        start_date, end_date = cmd.get("start_date") or None, cmd.get("end_date") or None
+        if not self.backtest_lock.acquire(blocking=False):
+            self.reply("error", "A backtest is already running", "Wait for it to finish, then retry.",
+                       cmd=cmd, retry=True)
+            return
+        self.r.hset(K.STRATEGY_MODES, sid, "test")
+        live_handoff = not end_date
+        self.reply("info", f"Backtest started for {sid}",
+                   f"{start_date} -> {end_date or 'now'}" + ("; hands off to live when done" if live_handoff else ""),
+                   cmd=cmd)
+
+        def work():
+            rt = K.connect(K.test_url())
+            try:
+                insts = [node.cache.instrument(i) for i in strat.config.instrument_ids]
+                result = run_backtest(rt, strat, [i for i in insts if i is not None],
+                                      start_date=start_date, end_date=end_date)
+                self.reply("success" if not result["skipped"] else "warn",
+                           f"Backtest finished for {sid}: {result['closed']} closed, "
+                           f"PnL {result['pnl']:+,.2f} USDT",
+                           (f"No data for {len(result['skipped'])} instrument(s): "
+                            + ", ".join(result["skipped"])) if result["skipped"] else "", cmd=cmd)
+                if live_handoff:
+                    self.on_loop(cmd, strat.arm, f"Live hand-off {sid}")
+            except Exception as e:
+                traceback.print_exc()
+                self.reply("error", f"Backtest failed for {sid}", f"{type(e).__name__}: {e}", cmd=cmd, retry=True)
+            finally:
+                self.backtest_lock.release()
+                rt.close()
+
+        threading.Thread(target=work, name=f"backtest-{sid}", daemon=True).start()
+
 
 if __name__ == "__main__":
-    r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
-    # Preserve the persisted overall (cross-session) PnL across the flush so it
-    # survives node restarts; everything else is session state and gets wiped.
-    _saved_overall = r.get(OVERALL_PNL_KEY)
-    if _saved_overall:
-        r.set(OVERALL_PNL_KEY, _saved_overall)
-    # Show strategies on the dashboard immediately as STOPPED, they don't run
-    # until the user presses Start (the manager auto-stops them on startup).
-    for _sid in _strats:
-        r.sadd(STRATEGY_SET, _sid)
-        r.hset(STRATEGY_STATES_KEY, _sid, "STOPPED")
-    r.close()
-    loop = node.get_event_loop()
-    t = threading.Thread(target=_strategy_manager, args=(loop,), daemon=True)
-    t.start()
+    dispatcher = Dispatcher(node.get_event_loop())
+    threading.Thread(target=dispatcher.run, name="dispatcher", daemon=True).start()
     try:
         node.run()
     except KeyboardInterrupt:
-        node.stop()
+        pass
     finally:
-        _stop_event.set()
+        dispatcher.stop.set()
+        try:
+            node.stop()
+        except Exception:
+            pass
         node.dispose()

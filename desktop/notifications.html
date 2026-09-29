@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+<title>Nautilus notifications</title>
+<!--
+  The app's own notification overlay: a transparent, click-through,
+  always-on-top window along the right edge of the screen. The main process
+  sends 'toast:add'. While the pointer is over a toast the window takes
+  clicks (notif:hover); a click hands the toast id back (notif:click) and the
+  main process focuses the app and runs the toast's action.
+-->
+<style>
+  :root { --panel:#11161f; --panel2:#161d29; --border:#232b38; --border-strong:#2f3a4c; --text:#e6edf3;
+          --muted:#8b96a5; --faint:#5c6773; --accent:#58a6ff; --green:#3fb950; --red:#f85149; --amber:#d29922; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:transparent; overflow:hidden; }
+  body { font:12.5px/1.45 "Segoe UI",system-ui,sans-serif; color:var(--text); -webkit-font-smoothing:antialiased;
+         user-select:none; }
+  #stack { position:absolute; right:14px; bottom:14px; width:364px; display:flex; flex-direction:column-reverse; gap:10px; }
+
+  .toast { --k:var(--accent); position:relative; display:flex; gap:12px; padding:13px 34px 15px 14px;
+           background:linear-gradient(180deg, rgba(22,29,41,.97), rgba(17,22,31,.97));
+           border:1px solid var(--border); border-radius:12px; overflow:hidden; cursor:pointer;
+           box-shadow:0 14px 34px rgba(0,0,0,.5), 0 2px 6px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.03);
+           transform-origin:right bottom; animation:in .42s cubic-bezier(.2,.9,.25,1.15) both;
+           transition:border-color .15s, transform .15s; }
+  .toast:hover { border-color:var(--border-strong); transform:translateX(-2px); }
+  .toast::before { content:''; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--k);
+                   box-shadow:0 0 12px var(--k); }
+  .toast.success { --k:var(--green); } .toast.error { --k:var(--red); } .toast.warn { --k:var(--amber); }
+  .toast.out { animation:out .3s cubic-bezier(.4,0,1,1) forwards; pointer-events:none; }
+  @keyframes in  { from { opacity:0; transform:translateX(56px) scale(.96); } to { opacity:1; transform:none; } }
+  @keyframes out { to { opacity:0; transform:translateX(70px); margin-bottom:calc(-1 * var(--h, 80px) - 10px); } }
+
+  .ic { width:30px; height:30px; flex-shrink:0; border-radius:9px; display:grid; place-items:center;
+        background:color-mix(in srgb, var(--k) 16%, transparent); color:var(--k);
+        box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--k) 35%, transparent); }
+  .ic svg { width:16px; height:16px; stroke:currentColor; fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+  .main { min-width:0; flex:1; }
+  .meta { display:flex; align-items:center; gap:6px; font-size:10.5px; color:var(--faint);
+          text-transform:uppercase; letter-spacing:.08em; margin-bottom:3px; }
+  .meta i { width:6px; height:6px; border-radius:1.5px; background:var(--accent); transform:rotate(45deg); }
+  .meta .when { margin-left:auto; text-transform:none; letter-spacing:0; }
+  .title { font-weight:600; font-size:13px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .body { margin-top:2px; color:var(--muted); white-space:pre-line; overflow:hidden; display:-webkit-box;
+          -webkit-line-clamp:4; -webkit-box-orient:vertical; word-break:break-word; }
+  .hint { margin-top:6px; font-size:11px; color:var(--k); opacity:0; transition:opacity .15s; }
+  .toast.has-action:hover .hint { opacity:.9; }
+  .x { position:absolute; top:9px; right:9px; width:20px; height:20px; border-radius:6px; border:0; padding:0;
+       background:none; color:var(--faint); display:grid; place-items:center; cursor:pointer; opacity:0; transition:.15s; }
+  .toast:hover .x { opacity:1; }
+  .x:hover { background:var(--panel2); color:var(--text); }
+  .x svg { width:10px; height:10px; stroke:currentColor; stroke-width:2; }
+  .life { position:absolute; left:0; right:0; bottom:0; height:2px; background:rgba(255,255,255,.04); }
+  .life b { display:block; height:100%; width:100%; background:var(--k); opacity:.7; transform-origin:left;
+            animation:life linear forwards; }
+  .toast:hover .life b, #stack.hold .life b { animation-play-state:paused; }
+  @keyframes life { to { transform:scaleX(0); } }
+  .more { align-self:flex-end; font-size:11px; color:var(--muted); background:rgba(17,22,31,.92);
+          border:1px solid var(--border); border-radius:999px; padding:3px 10px; }
+  @media (prefers-reduced-motion: reduce) { .toast, .toast.out { animation-duration:.01s; } }
+</style>
+</head>
+<body>
+<div id="stack"></div>
+<script>
+  const T = window.desktop.toasts;
+  const stack = document.getElementById('stack');
+  const MAX_VISIBLE = 4;
+  const LIFE = { success: 7000, info: 7000, warn: 10000, error: 14000 };
+  const ICONS = {
+    success: '<path d="M3.5 8.5l3 3 6-7"/>',
+    error: '<path d="M8 4.5v4.5"/><path d="M8 11.8v.2"/><circle cx="8" cy="8" r="6.2"/>',
+    warn: '<path d="M8 2.5l6 10.5H2z"/><path d="M8 6.5v3"/><path d="M8 11.3v.2"/>',
+    info: '<circle cx="8" cy="8" r="6.2"/><path d="M8 7.3v4"/><path d="M8 4.8v.2"/>',
+  };
+  const queue = [];          // over MAX_VISIBLE: wait for a slot
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const ago = t => { const s = Math.round((Date.now() - t) / 1000);
+                     return s < 45 ? 'now' : s < 3600 ? Math.round(s / 60) + 'm ago' : Math.round(s / 3600) + 'h ago'; };
+
+  function visible() { return stack.querySelectorAll('.toast:not(.out)').length; }
+
+  function add(t) {
+    if (visible() >= MAX_VISIBLE) { queue.push(t); renderMore(); return; }
+    const el = document.createElement('div');
+    el.className = 'toast has-action ' + t.kind;
+    el.dataset.id = t.id;
+    el.dataset.time = t.time;
+    const life = LIFE[t.kind] || 7000;
+    el.innerHTML =
+      `<div class="ic"><svg viewBox="0 0 16 16">${ICONS[t.kind] || ICONS.info}</svg></div>` +
+      `<div class="main"><div class="meta"><i></i>${esc(t.source)}<span class="when">now</span></div>` +
+      `<div class="title">${esc(t.title)}</div>` +
+      (t.body ? `<div class="body">${esc(t.body)}</div>` : '') +
+      `<div class="hint">Click to open</div></div>` +
+      `<button class="x" title="Dismiss"><svg viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8"/></svg></button>` +
+      `<div class="life"><b style="animation-duration:${life}ms"></b></div>`;
+    el.addEventListener('click', e => {
+      if (e.target.closest('.x')) { T.dismiss(t.id); remove(el); return; }
+      T.click(t.id); remove(el);
+    });
+    el.querySelector('.life b').addEventListener('animationend', () => { T.dismiss(t.id); remove(el); });
+    stack.prepend(el);        // column-reverse: first child sits at the bottom, nearest the corner
+    renderMore();
+  }
+
+  function remove(el) {
+    if (el.classList.contains('out')) return;
+    el.style.setProperty('--h', el.offsetHeight + 'px');
+    el.classList.add('out');
+    setTimeout(() => {
+      el.remove();
+      if (queue.length) add(queue.shift());
+      renderMore();
+      if (!stack.querySelector('.toast')) { hovering(false); T.empty(); }
+    }, 300);
+  }
+
+  function renderMore() {
+    let m = stack.querySelector('.more');
+    if (!queue.length) { if (m) m.remove(); return; }
+    if (!m) { m = document.createElement('div'); m.className = 'more'; }
+    m.textContent = `+${queue.length} more`;
+    stack.appendChild(m);
+  }
+
+  let over = false;
+  function hovering(v) { if (v !== over) { over = v; T.hover(v); stack.classList.toggle('hold', v); } }
+  stack.addEventListener('mouseenter', () => hovering(true));
+  stack.addEventListener('mouseleave', () => hovering(false));
+  // the window is click-through until the pointer is over the stack
+  document.addEventListener('mousemove', e => hovering(!!e.target.closest('#stack')));
+
+  setInterval(() => stack.querySelectorAll('.toast').forEach(el =>
+    el.querySelector('.when').textContent = ago(+el.dataset.time)), 30000);
+
+  T.onAdd(add);
+</script>
+</body>
+</html>

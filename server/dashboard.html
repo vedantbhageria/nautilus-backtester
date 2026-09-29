@@ -35,7 +35,15 @@
   .conn{ font-size:11px; color:var(--dim); letter-spacing:.04em; }
   select,input{ appearance:none; background:var(--panel-2); border:1px solid var(--line); color:var(--text); font-family:var(--mono); font-size:12.5px; font-weight:600; padding:7px 11px; border-radius:7px; outline:none; transition:border-color .15s; }
   select:focus,input:focus{ border-color:var(--amber); }
-  .addbar{ display:flex; align-items:center; gap:8px; margin-left:auto; }
+  .addbar{ display:flex; align-items:center; gap:8px; margin-left:auto; position:relative; }
+  #resetBtn{ display:none; position:absolute; top:8px; right:8px; z-index:5; align-items:center; gap:5px;
+             background:var(--panel-2); border:1px solid var(--line); color:var(--dim); font:700 11px var(--mono);
+             padding:5px 10px; border-radius:6px; cursor:pointer; transition:.15s; }
+  #resetBtn:hover{ color:var(--amber); border-color:var(--amber); }
+  #resetBtn.shift{ right:82px; }   /* make room when the "live" button is showing */
+  #addInput.bad{ border-color:var(--red)!important; box-shadow:0 0 0 2px rgba(222,81,99,.25); }
+  #addMsg{ position:absolute; top:calc(100% + 4px); right:0; z-index:20; font:600 11px var(--mono); color:var(--red);
+           background:var(--panel-2); border:1px solid var(--line); border-radius:6px; padding:5px 8px; white-space:nowrap; display:none; }
   button.btn{ background:var(--panel-2); border:1px solid var(--line); color:var(--dim); font-family:var(--mono); font-size:11.5px; font-weight:700; letter-spacing:.04em; padding:7px 12px; border-radius:7px; cursor:pointer; transition:.15s; }
   button.btn:hover{ border-color:var(--amber); color:var(--text); }
 
@@ -202,6 +210,90 @@
   #acZoomVal{ font-size:22px; font-weight:700; font-variant-numeric:tabular-nums; }
   #acZoomHint{ font-size:9.5px; color:var(--dim-2); }
   #acZoomCanvas{ width:100%; height:360px; display:block; cursor:grab; border-radius:6px; }
+
+  /* ---- status pills (node / health) ---- */
+  .pill{ display:inline-flex; align-items:center; gap:5px; font-size:10px; font-weight:700; letter-spacing:.05em; padding:3px 8px; border-radius:10px; border:1px solid var(--line); color:var(--dim); white-space:nowrap; }
+  .pill .dot{ width:6px; height:6px; border-radius:50%; background:var(--dim-2); }
+  .pill.ok{ color:var(--green); border-color:rgba(38,166,154,.45); } .pill.ok .dot{ background:var(--green); }
+  .pill.warn{ color:var(--amber); border-color:rgba(224,162,51,.5); } .pill.warn .dot{ background:var(--amber); }
+  .pill.bad{ color:var(--red); border-color:rgba(239,83,80,.55); } .pill.bad .dot{ background:var(--red); animation:pulse 1.2s infinite; }
+  .tab .tdot{ display:inline-block; width:6px; height:6px; border-radius:50%; margin-left:6px; vertical-align:middle; background:transparent; }
+  .tab .tdot.ok{ background:var(--green); } .tab .tdot.warn{ background:var(--amber); } .tab .tdot.fail{ background:var(--red); }
+
+  /* ---- notification centre ---- */
+  #bellBtn{ position:relative; background:var(--panel-2); border:1px solid var(--line); color:var(--dim); font:700 13px var(--mono); width:34px; height:32px; border-radius:7px; cursor:pointer; }
+  #bellBtn:hover{ border-color:var(--amber); color:var(--text); }
+  #bellCount{ position:absolute; top:-6px; right:-6px; min-width:16px; height:16px; padding:0 4px; border-radius:8px; background:var(--red); color:#fff; font-size:9.5px; line-height:16px; display:none; }
+  #notifPanel{ position:fixed; top:84px; right:16px; width:420px; max-height:72vh; z-index:300; background:var(--panel); border:1px solid var(--line); border-radius:10px; box-shadow:0 10px 30px rgba(0,0,0,.5); display:none; flex-direction:column; }
+  #notifPanel.open{ display:flex; }
+  .np-head{ display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid var(--line-soft); font-size:9px; letter-spacing:.12em; text-transform:uppercase; color:var(--dim-2); }
+  .np-head button{ margin-left:auto; }
+  .np-filter{ background:none; border:1px solid var(--line); color:var(--dim); font:700 9.5px var(--mono); padding:3px 7px; border-radius:5px; cursor:pointer; }
+  .np-filter.on{ color:var(--text); border-color:var(--amber); }
+  #notifList{ overflow-y:auto; padding:8px; }
+  .note{ border:1px solid var(--line-soft); border-left:3px solid var(--dim-2); border-radius:7px; padding:7px 9px; margin-bottom:6px; font-size:11px; background:var(--panel-2); }
+  .note.error{ border-left-color:var(--red); } .note.warn{ border-left-color:var(--amber); }
+  .note.success{ border-left-color:var(--green); } .note.info{ border-left-color:var(--blue); }
+  .note .n-top{ display:flex; gap:6px; align-items:baseline; }
+  .note .n-title{ font-weight:700; flex:1; min-width:0; }
+  .note .n-meta{ font-size:9.5px; color:var(--dim-2); white-space:nowrap; }
+  .note .n-detail{ color:var(--dim); margin-top:4px; white-space:pre-wrap; word-break:break-word; max-height:140px; overflow:auto; font-size:10.5px; }
+  .note .n-actions{ display:flex; gap:6px; margin-top:6px; }
+  .note .n-actions button, .toast button{ background:var(--panel); border:1px solid var(--line); color:var(--text); font:700 10px var(--mono); padding:3px 9px; border-radius:5px; cursor:pointer; }
+  .note .n-actions button.retry, .toast button.retry{ border-color:var(--amber); color:var(--amber); }
+  .note .n-count{ font-size:9px; color:var(--dim-2); border:1px solid var(--line); border-radius:8px; padding:0 5px; }
+  #toasts{ position:fixed; right:16px; bottom:40px; z-index:400; display:flex; flex-direction:column-reverse; gap:8px; width:380px; pointer-events:none; }
+  .toast{ pointer-events:auto; background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--blue); border-radius:8px; padding:9px 11px; font-size:11px; box-shadow:0 8px 24px rgba(0,0,0,.45); animation:tin .18s ease-out; }
+  .toast.error{ border-left-color:var(--red); } .toast.warn{ border-left-color:var(--amber); } .toast.success{ border-left-color:var(--green); }
+  .toast .t-title{ font-weight:700; } .toast .t-detail{ color:var(--dim); margin-top:3px; white-space:pre-wrap; max-height:80px; overflow:hidden; font-size:10.5px; }
+  .toast .t-actions{ display:flex; gap:6px; margin-top:7px; }
+  @keyframes tin{ from{ transform:translateY(8px); opacity:0; } to{ transform:none; opacity:1; } }
+
+  /* ---- command feedback in the strategy modal ---- */
+  .btn[disabled]{ opacity:.45; cursor:wait; }
+  #modalCmdStatus{ font-size:10px; min-height:14px; margin:-2px 0 8px; color:var(--dim-2); }
+  #modalCmdStatus.error{ color:var(--red); } #modalCmdStatus.success{ color:var(--green); } #modalCmdStatus.pending{ color:var(--amber); }
+  .st-grid{ display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin-bottom:4px; }
+  .st-list{ font-size:10px; color:var(--dim); margin:4px 0 2px; line-height:1.45; word-break:break-word; }
+  .st-list b{ color:var(--amber); font-weight:700; }
+  .strat-row .sr-state{ font-size:8.5px; font-weight:700; letter-spacing:.06em; margin-left:6px; padding:1px 5px; border-radius:4px; border:1px solid var(--line); color:var(--dim-2); white-space:nowrap; }
+  .strat-row .sr-state.run{ color:var(--green); border-color:rgba(38,166,154,.5); }
+  .strat-row .sr-state.warm{ color:var(--amber); border-color:rgba(224,162,51,.5); }
+  .strat-row .sr-state.exit{ color:var(--red); border-color:rgba(239,83,80,.5); }
+
+  /* ---- per-strategy stat panels ---- */
+  .strat-stats{ background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px 12px 12px; margin-bottom:10px; }
+  .strat-stats.in-modal{ padding:8px 10px 10px; margin-bottom:4px; }
+  .ss-head{ display:flex; align-items:center; gap:10px; margin-bottom:9px; }
+  .ss-head .ss-name{ font-size:11px; font-weight:700; letter-spacing:.06em; color:var(--amber); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ss-head .ss-state{ font-size:8.5px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; padding:2px 6px; border-radius:4px; border:1px solid var(--line); color:var(--dim-2); flex-shrink:0; }
+  .ss-head .ss-state.on{ color:var(--green); border-color:var(--green); }
+  .ss-head .ss-net{ margin-left:auto; font-size:16px; font-weight:700; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .stat-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(94px,1fr)); gap:6px; }
+  .stat-cell{ background:var(--panel-2); border:1px solid var(--line-soft); border-radius:7px; padding:6px 9px; min-width:0; }
+  .stat-cell .lbl{ font-size:8.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--dim-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .stat-cell .val{ font-size:13px; font-weight:700; font-variant-numeric:tabular-nums; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .stat-cell .sub{ font-size:8.5px; color:var(--dim-2); margin-top:1px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .ss-spark{ display:block; width:100%; height:34px; margin-top:8px; }
+  .ss-spark-lbl{ font-size:8.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--dim-2); margin-top:6px; }
+
+  /* ---- health view ---- */
+  #healthView{ flex:1; overflow:auto; padding:14px 18px 20px; }
+  .hv-top{ display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px; align-items:stretch; }
+  .hv-card{ background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px 14px; min-width:170px; }
+  .hv-card .lbl{ font-size:9px; letter-spacing:.1em; text-transform:uppercase; color:var(--dim-2); }
+  .hv-card .val{ font-size:15px; font-weight:700; margin-top:4px; }
+  .hv-card .sub{ font-size:9.5px; color:var(--dim-2); margin-top:3px; max-width:260px; word-break:break-word; }
+  .hv-card.ok .val{ color:var(--green); } .hv-card.warn .val{ color:var(--amber); } .hv-card.bad .val{ color:var(--red); }
+  .hv-bar{ display:flex; align-items:center; gap:10px; margin-bottom:10px; font-size:11px; color:var(--dim); }
+  .hv-table{ background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .hv-row{ display:grid; grid-template-columns:62px 1fr; gap:10px; padding:8px 12px; border-bottom:1px solid var(--line-soft); font-size:11.5px; cursor:default; }
+  .hv-row:last-child{ border-bottom:none; }
+  .hv-row .st{ font-size:9.5px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; padding:2px 0; text-align:center; border-radius:4px; height:fit-content; }
+  .hv-row .st.pass{ color:var(--green); background:rgba(38,166,154,.12); } .hv-row .st.warn{ color:var(--amber); background:rgba(224,162,51,.12); }
+  .hv-row .st.fail{ color:var(--red); background:rgba(239,83,80,.14); } .hv-row .st.skip{ color:var(--dim-2); background:var(--panel-2); }
+  .hv-row .ttl{ font-weight:700; } .hv-row .det{ color:var(--dim); margin-top:2px; }
+  .hv-row .items{ margin-top:4px; font-size:10.5px; color:var(--dim); white-space:pre-wrap; max-height:160px; overflow:auto; }
 </style>
 </head>
 <body>
@@ -209,7 +301,7 @@
     <button id="modeLive" class="mode-tab active live" onclick="setMode('live')">● Live</button>
     <button id="modeTest" class="mode-tab test" onclick="setMode('test')">⚗ Test</button>
     <div id="modeSep"></div>
-    <span id="modeLabel">live trading · DEMO execution</span>
+    <span id="modeLabel">live data · sandbox execution</span>
   </div>
   <header>
     <span class="live-dot" id="connDot"></span>
@@ -219,12 +311,16 @@
       <button class="tab active" data-view="charts" onclick="switchView('charts')">Charts</button>
       <button class="tab" data-view="positions" onclick="switchView('positions')">Positions</button>
       <button class="tab" data-view="account" onclick="switchView('account')">Account</button>
+      <button class="tab" data-view="health" onclick="switchView('health')">Health<span class="tdot" id="healthDot"></span></button>
     </div>
+    <span class="pill" id="nodePill" title="Trading node heartbeat"><span class="dot"></span><span id="nodePillTxt">node …</span></span>
     <div class="addbar">
       <span id="hdrClock" style="align-self:center;margin-right:10px;font:600 12px ui-monospace,monospace;color:var(--dim-2);letter-spacing:.5px;white-space:nowrap;">--:--:--</span>
+      <button id="bellBtn" title="Notifications" onclick="toggleNotifPanel()">&#128276;<span id="bellCount"></span></button>
       <input id="addInput" list="symList" placeholder="add instrument, enter…" autocomplete="off" />
       <datalist id="symList"></datalist>
       <button class="btn" id="addBtn">add</button>
+      <span id="addMsg"></span>
     </div>
   </header>
 
@@ -270,13 +366,14 @@
         <span class="ind-sep"></span>
         <label class="ind-cb"><input type="checkbox" id="cbRsi"> RSI(14)</label>
         <span class="ind-sep"></span>
-        <label class="ind-cb"><input type="checkbox" id="cbFlags" checked> Flags</label>
+        <label class="ind-cb" title="Entry/exit points of the live-testing positions"><input type="checkbox" id="cbFlags" checked> Buy/Sell markers</label>
+        <label class="ind-cb" title="Shade each position from entry to exit: green = profit, red = loss, lighter = still open"><input type="checkbox" id="cbShade"> Shade positions</label>
       </div>
       <div class="chartwrap">
         <canvas id="chart"></canvas>
         <div id="oscPanel"><canvas id="oscChart"></canvas></div>
         <div id="ddPanel"><canvas id="ddChart"></canvas></div>
-        <div class="loading-bar" id="loadingBar"></div><div class="loading-pill" id="loadingPill"><span class="dot"></span>backfilling…</div><div class="chart-empty" id="chartEmpty">select an instrument</div><button id="liveBtn" style="display:none;position:absolute;top:8px;right:8px;align-items:center;gap:5px;background:var(--panel-2);border:1px solid var(--amber);color:var(--amber);font-family:var(--mono);font-size:11px;font-weight:700;padding:5px 10px;border-radius:6px;cursor:pointer;">&#9679; live</button>
+        <div class="loading-bar" id="loadingBar"></div><div class="loading-pill" id="loadingPill"><span class="dot"></span>backfilling…</div><div class="chart-empty" id="chartEmpty">select an instrument</div><button id="resetBtn" title="Reset view: default zoom, back to the latest data (double-click the chart or press R)">&#10226; reset</button><button id="liveBtn" style="display:none;position:absolute;top:8px;right:8px;align-items:center;gap:5px;background:var(--panel-2);border:1px solid var(--amber);color:var(--amber);font-family:var(--mono);font-size:11px;font-weight:700;padding:5px 10px;border-radius:6px;cursor:pointer;">&#9679; live</button>
       </div>
     </div>
 
@@ -380,6 +477,18 @@
     </div>
   </div>
 
+  <!-- Health view: component status + consistency report -->
+  <div id="healthView" style="display:none;">
+    <div class="hv-top" id="hvCards"></div>
+    <div class="hv-bar">
+      <span id="hvSummary">no report yet</span>
+      <button class="btn" id="hvRun" onclick="refreshHealth(true)">Run checks now</button>
+      <label class="ind-cb"><input type="checkbox" id="hvOnlyIssues" checked onchange="renderHealth()"> only issues</label>
+      <span style="margin-left:auto;font-size:10px;color:var(--dim-2);">same report from a shell: <code>.venv\Scripts\python.exe scripts\verify_consistency.py</code></span>
+    </div>
+    <div class="hv-table" id="hvChecks"></div>
+  </div>
+
   <footer>
     <span>session <b id="fSession">0s</b></span>
     <span>received <b id="fBytes">0 B</b></span>
@@ -403,6 +512,18 @@
   </div>
 </div>
 
+<!-- Notification centre -->
+<div id="notifPanel">
+  <div class="np-head">
+    <span>Notifications</span>
+    <button class="np-filter on" data-f="all" onclick="setNotifFilter('all')">all</button>
+    <button class="np-filter" data-f="issues" onclick="setNotifFilter('issues')">errors+warnings</button>
+    <button class="btn" style="padding:4px 9px;font-size:10px;" onclick="clearNotes()">clear</button>
+  </div>
+  <div id="notifList"></div>
+</div>
+<div id="toasts"></div>
+
 <!-- Strategy drill-down modal -->
 <div id="stratModal" class="strat-modal-backdrop" style="display:none;" onclick="if(event.target===this)closeStratModal()">
   <div class="orders-panel" id="openPosPanel">
@@ -424,10 +545,10 @@
     </div>
     <!-- Live mode controls -->
     <div id="modalControlsLive" style="display:flex;gap:7px;margin-bottom:8px;">
-      <button class="btn" style="flex:1;font-size:11px;color:var(--green);" onclick="stratCmd('start_strategy')">▶ Start</button>
-      <button class="btn" style="flex:1;font-size:11px;" onclick="stratCmd('stop_strategy')">⏸ Pause</button>
-      <button class="btn" style="flex:1;font-size:11px;color:var(--red);" onclick="stratCmd('close_strategy')">✕ Close All</button>
-      <button class="btn" style="flex:1;font-size:11px;color:var(--amber);" onclick="stratCmd('export_csv')">↓ CSV</button>
+      <button class="btn cmdbtn" style="flex:1;font-size:11px;color:var(--green);" onclick="stratCmd('start_strategy')">▶ Start</button>
+      <button class="btn cmdbtn" style="flex:1;font-size:11px;" onclick="stratCmd('stop_strategy')">⏸ Pause</button>
+      <button class="btn cmdbtn" style="flex:1;font-size:11px;color:var(--red);" onclick="stratCmd('close_strategy')">✕ Close All</button>
+      <button class="btn cmdbtn" style="flex:1;font-size:11px;color:var(--amber);" onclick="stratCmd('export_csv')">↓ CSV</button>
     </div>
     <!-- Test mode controls -->
     <div id="modalControlsTest" style="display:none;margin-bottom:10px;">
@@ -443,14 +564,19 @@
         </div>
       </div>
       <div style="display:flex;gap:7px;margin-bottom:6px;">
-        <button class="btn" style="flex:1;font-size:11px;color:#22d3ee;" onclick="startTestStrategy()">⟲ Backfill + Start</button>
-        <button class="btn" style="flex:1;font-size:11px;" onclick="stratCmd('stop_strategy')">⏸ Pause</button>
-        <button class="btn" style="flex:1;font-size:11px;color:var(--red);" onclick="stratCmd('close_strategy')">✕ Close All</button>
-        <button class="btn" style="flex:1;font-size:11px;color:var(--amber);" onclick="stratCmd('export_csv')">↓ CSV</button>
+        <button class="btn cmdbtn" style="flex:1;font-size:11px;color:#22d3ee;" onclick="startTestStrategy()">⟲ Backfill + Start</button>
+        <button class="btn cmdbtn" style="flex:1;font-size:11px;" onclick="stratCmd('stop_strategy')">⏸ Pause</button>
+        <button class="btn cmdbtn" style="flex:1;font-size:11px;color:var(--red);" onclick="stratCmd('close_strategy')">✕ Close All</button>
+        <button class="btn cmdbtn" style="flex:1;font-size:11px;color:var(--amber);" onclick="stratCmd('export_csv')">↓ CSV</button>
       </div>
       <div id="btStatus" style="font-size:10px;color:var(--dim-2);min-height:14px;"></div>
     </div>
+    <div id="modalCmdStatus"></div>
     <div class="strat-modal-desc" id="modalDesc">–</div>
+    <div class="strat-modal-sec">Status</div>
+    <div id="modalStatus"></div>
+    <div class="strat-modal-sec">Performance</div>
+    <div id="modalStats"></div>
     <div class="strat-modal-sec">Strategy PnL</div>
     <div id="modalPnl"></div>
     <div class="strat-modal-sec">Live Metrics</div>
@@ -488,7 +614,7 @@ function setMode(m){
   document.getElementById("modeLive").classList.toggle("live", m==="live");
   document.getElementById("modeTest").classList.toggle("active", m==="test");
   document.getElementById("modeTest").classList.toggle("test", m==="test");
-  document.getElementById("modeLabel").textContent = m==="live" ? "live trading · DEMO execution" : "testing · testnet execution";
+  document.getElementById("modeLabel").textContent = m==="live" ? "live data · sandbox execution" : "testing · backtest + sandbox execution";
   document.getElementById("headerTitle").textContent = m==="live" ? "Nautilus · Live" : "Nautilus · Test";
   // show/hide modal controls
   const liveCtrl = document.getElementById("modalControlsLive");
@@ -532,12 +658,12 @@ async function startTestStrategy(){
   const startDate = document.getElementById("btStartDate").value;
   if(!startDate){ st.textContent = "start date required"; return; }
   const endDate = document.getElementById("btEndDate").value || null;
-  st.textContent = "starting backfill…";
-  try{
-    const r = await fetch(`/api/test/command`, {method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({action:"start_test_strategy", strategy_id:activeModal, start_date:startDate, end_date:endDate||""})});
-    if(!r.ok){ st.textContent="command failed ("+r.status+")"; return; }
-  }catch(e){ st.textContent="command failed: "+e.message; return; }
+  if(endDate && endDate <= startDate){ st.textContent = "end date must be after start date"; return; }
+  st.textContent = "sending…";
+  const r = await sendCommand("test", {action:"start_test_strategy", strategy_id:activeModal, start_date:startDate,
+                                       end_date:endDate||""}, `Backtest ${activeModal}`);
+  if(!r.ok){ st.textContent = "not started: " + r.error; return; }
+  st.textContent = "queued…";
   if(_btPoll) clearInterval(_btPoll);
   _btPoll = setInterval(pollTestBacktest, 2000);
   pollTestBacktest();
@@ -545,9 +671,10 @@ async function startTestStrategy(){
 
 async function pollTestBacktest(){
   const st = document.getElementById("btStatus");
-  let m; try{ m=await (await fetch(`/api/test/backtest/meta`)).json(); }catch(e){ return; }
+  let m; try{ m=await apiGet(`/api/test/backtest/meta`, "backtest progress"); }catch(e){ return; }
   if(m.status==="running"){
-    const phase = m.phase==="engine" ? "running engine…" : `fetching data ${m.done||0}/${m.n||0}`;
+    const skipped = (m.skipped||[]).length ? ` · ${m.skipped.length} skipped` : "";
+    const phase = m.phase==="engine" ? "running engine…" : `fetching data ${m.done||0}/${m.n||0}${skipped}`;
     if(st) st.textContent = phase;
   } else if(m.status==="done"){
     if(_btPoll){ clearInterval(_btPoll); _btPoll=null; }
@@ -566,7 +693,8 @@ async function pollTestBacktest(){
 
 async function _loadTestChartData(sym){
   try{
-    const d = await (await fetch(`/api/test/chart_bars/${encodeURIComponent(sym)}`)).json();
+    const d = await apiGet(`/api/test/chart_bars/${encodeURIComponent(sym)}`, `backtest chart for ${sym}`,
+                           ()=>_loadTestChartData(sym));
     const barEntries = d && d.bars;
     if(barEntries && barEntries.length){
       for(const entry of barEntries){
@@ -581,7 +709,225 @@ async function _loadTestChartData(sym){
   }catch(e){}
 }
 
+// ---------- notifications ----------
+// One store for everything the system reports: node / strategy / server
+// notifications from Redis (pushed over the WS, replayed on connect) and this
+// page's own failures (API calls, lost connection). Repeats of one condition
+// (same `key`) collapse into a single entry with a count. An entry that
+// carries a command (`retry`) or a local action (`retryFn`) gets a Retry button.
+const NOTES = [];                 // newest first
+const MAX_NOTES = 200;
+const _seenNoteIds = new Set();
+let _notifFilter = "all", _unread = 0;
+const _pendingCmds = {};          // cmd_id -> {label, mode, command, t}
+const _esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function onNotification(m){
+  const id = m.id || `l${Date.now()}${Math.random()}`;
+  if(_seenNoteIds.has(id)) return;              // reconnect replay of something we have
+  _seenNoteIds.add(id);
+  const note = {id, level:m.level||"info", source:m.source||"", title:m.title||"", detail:m.detail||"",
+    key:m.key||"", retry:m.retry||null, retryFn:m.retryFn||null, cmd_id:m.cmd_id||"",
+    ts: m.ts ? m.ts*1000 : Date.now(), count:1};
+  if(note.key){
+    const i = NOTES.findIndex(n=>n.key===note.key);
+    if(i>=0){ note.count = NOTES[i].count + 1; NOTES.splice(i,1); }
+  }
+  NOTES.unshift(note);
+  if(NOTES.length > MAX_NOTES) NOTES.length = MAX_NOTES;
+  if(note.cmd_id) _resolveCmd(note);
+  if(!m.replay){
+    showToast(note);
+    if((note.level==="error"||note.level==="warn") && !document.getElementById("notifPanel").classList.contains("open")) _unread++;
+  }
+  _renderBell(); renderNotes();
+}
+function localNote(level, title, detail="", opts={}){
+  onNotification({level, source:"dashboard", title, detail, ts:Date.now()/1000, ...opts});
+}
+function _renderBell(){
+  const c = document.getElementById("bellCount");
+  c.textContent = _unread > 99 ? "99+" : _unread;
+  c.style.display = _unread ? "block" : "none";
+}
+function toggleNotifPanel(force){
+  const p = document.getElementById("notifPanel");
+  const open = force!==undefined ? force : !p.classList.contains("open");
+  p.classList.toggle("open", open);
+  if(open){ _unread = 0; _renderBell(); renderNotes(); }
+}
+function setNotifFilter(f){
+  _notifFilter = f;
+  document.querySelectorAll(".np-filter").forEach(b=>b.classList.toggle("on", b.dataset.f===f));
+  renderNotes();
+}
+function clearNotes(){ NOTES.length = 0; renderNotes(); }
+function _ago(ms){ const s=Math.max(0,(Date.now()-ms)/1000); return s<60?`${s|0}s ago`:s<3600?`${(s/60)|0}m ago`:new Date(ms).toLocaleTimeString("en-GB",{hour12:false}); }
+function _noteHTML(n, compact){
+  const canRetry = n.retry || n.retryFn;
+  const src = n.source.replace(/^strategy:/,"");
+  return `<div class="${compact?"toast":"note"} ${n.level}" data-id="${_esc(n.id)}">
+    <div class="${compact?"t-title":"n-top"}">${compact?_esc(n.title):`<span class="n-title">${_esc(n.title)}</span>${n.count>1?`<span class="n-count">×${n.count}</span>`:""}<span class="n-meta">${_esc(src)} · ${_ago(n.ts)}</span>`}</div>
+    ${n.detail?`<div class="${compact?"t-detail":"n-detail"}">${_esc(n.detail)}</div>`:""}
+    <div class="${compact?"t-actions":"n-actions"}">
+      ${canRetry?`<button class="retry" onclick="retryNote('${_esc(n.id)}',this)">Retry</button>`:""}
+      <button onclick="${compact?"this.closest('.toast').remove()":`dismissNote('${_esc(n.id)}')`}">${compact?"Dismiss":"Dismiss"}</button>
+      ${compact?`<button onclick="toggleNotifPanel(true);this.closest('.toast').remove()">All</button>`:""}
+    </div></div>`;
+}
+function renderNotes(){
+  const el = document.getElementById("notifList");
+  if(!document.getElementById("notifPanel").classList.contains("open")) return;
+  const list = NOTES.filter(n => _notifFilter==="all" || n.level==="error" || n.level==="warn");
+  el.innerHTML = list.length ? list.map(n=>_noteHTML(n,false)).join("") : '<div class="pos-empty">nothing to report</div>';
+}
+function dismissNote(id){ const i=NOTES.findIndex(n=>n.id===id); if(i>=0) NOTES.splice(i,1); renderNotes(); }
+function showToast(n){
+  const box = document.getElementById("toasts");
+  if(n.key) box.querySelectorAll(".toast").forEach(t=>{ if(t.dataset.key===n.key) t.remove(); });
+  const wrap = document.createElement("div");
+  wrap.innerHTML = _noteHTML(n, true);
+  const t = wrap.firstElementChild; t.dataset.key = n.key;
+  box.appendChild(t);
+  while(box.children.length > 5) box.firstElementChild.remove();
+  const ms = n.level==="error" ? 15000 : n.level==="warn" ? 9000 : 5000;
+  setTimeout(()=>t.remove(), ms);
+}
+async function retryNote(id, btn){
+  const n = NOTES.find(x=>x.id===id) || {};
+  if(btn){ btn.disabled = true; btn.textContent = "…"; }
+  if(n.retryFn){ try{ await n.retryFn(); }catch(e){} }
+  else if(n.retry && n.retry.command){
+    await sendCommand(n.retry.mode||currentMode, n.retry.command, `Retry: ${n.title}`);
+  }
+  if(btn){ btn.disabled = false; btn.textContent = "Retry"; }
+}
+
+// ---------- commands ----------
+// Every command goes through the server, which validates it and refuses it
+// with a reason (unknown strategy, node down, bad dates...). An accepted
+// command gets a cmd_id; the node's reply notification carries the same id.
+async function sendCommand(mode, command, label){
+  let res, body = {};
+  try{
+    res = await fetch(`/api/${mode}/command`, {method:"POST", headers:{"Content-Type":"application/json"},
+                                               body:JSON.stringify(command)});
+    body = await res.json().catch(()=>({}));
+  }catch(e){
+    localNote("error", `${label}: dashboard server unreachable`, String(e.message||e), {retry:{mode, command}, key:`cmd:${label}`});
+    return {ok:false, error:"dashboard server unreachable"};
+  }
+  if(!res.ok || !body.ok){
+    const err = body.error || `HTTP ${res.status}`;
+    localNote("error", `${label}: not sent`, err, {retry:{mode, command}, key:`cmd:${label}`});
+    return {ok:false, error:err};
+  }
+  if(body.cmd_id){
+    _pendingCmds[body.cmd_id] = {label, mode, command, t:Date.now()};
+    setTimeout(()=>{
+      if(!_pendingCmds[body.cmd_id]) return;
+      delete _pendingCmds[body.cmd_id];
+      localNote("warn", `${label}: no answer from the node`,
+        "Delivered, but the node hasn't replied in 20s. It may still be working (a large close-all) or it may have stopped: check the Health tab.",
+        {retry:{mode, command}, key:`cmd:${label}`});
+      _cmdChanged(); _setCmdStatus("error", `${label}: no answer from the node`);
+    }, 20000);
+  }
+  _cmdChanged();
+  return {ok:true, cmd_id:body.cmd_id};
+}
+function _resolveCmd(note){
+  const p = _pendingCmds[note.cmd_id]; if(!p) return;
+  delete _pendingCmds[note.cmd_id];
+  if(activeModal && p.command.strategy_id===activeModal)
+    _setCmdStatus(note.level==="error"?"error":note.level==="success"?"success":"pending", note.title + (note.level==="error"&&note.detail?` — ${note.detail}`:""));
+  _cmdChanged();
+}
+function _cmdChanged(){
+  const busy = Object.values(_pendingCmds).some(p=>p.command.strategy_id===activeModal);
+  document.querySelectorAll(".cmdbtn").forEach(b=>b.disabled = busy);
+}
+function _setCmdStatus(cls, text){
+  const el = document.getElementById("modalCmdStatus"); if(!el) return;
+  el.className = cls||""; el.textContent = text||"";
+}
+
+// GET JSON; a failure becomes one collapsed notification (optionally retryable).
+async function apiGet(path, what, retryFn){
+  try{
+    const r = await fetch(path);
+    const body = await r.json().catch(()=>null);
+    if(!r.ok) throw new Error((body && body.error) || `HTTP ${r.status}`);
+    return body;
+  }catch(e){
+    localNote("error", `Couldn't load ${what}`, `${path}: ${e.message||e}`, {key:`api:${path}`, retryFn});
+    throw e;
+  }
+}
+
+// ---------- health ----------
+let _lastHealth = null, _lastReport = null, _healthTimer = null;
+async function refreshHealth(manual){
+  const btn = document.getElementById("hvRun");
+  if(manual && btn){ btn.disabled = true; btn.textContent = "checking…"; }
+  try{
+    const [h, rep] = await Promise.all([apiGet("/api/health", "health status", ()=>refreshHealth(true)),
+                                        apiGet("/api/consistency", "consistency report", ()=>refreshHealth(true))]);
+    _lastHealth = h; _lastReport = rep;
+    _setHealthDot(rep.status);
+    renderHealth();
+  }catch(e){ _setHealthDot("fail"); }
+  finally{ if(btn){ btn.disabled = false; btn.textContent = "Run checks now"; } }
+}
+function _setHealthDot(status){ const d=document.getElementById("healthDot"); if(d) d.className = "tdot " + (status||""); }
+function renderHealth(){
+  const h = _lastHealth, rep = _lastReport;
+  const cards = document.getElementById("hvCards"), rows = document.getElementById("hvChecks");
+  if(!h || !rep){ cards.innerHTML=""; rows.innerHTML='<div class="pos-empty" style="padding:14px;">loading…</div>'; return; }
+  const card = (cls, lbl, val, sub) => `<div class="hv-card ${cls}"><div class="lbl">${lbl}</div><div class="val">${_esc(val)}</div>${sub?`<div class="sub">${_esc(sub)}</div>`:""}</div>`;
+  const n = h.node || {};
+  let html = "";
+  for(const db of ["live","test"]){
+    const err = (h.redis||{})[db];
+    html += card(err?"bad":"ok", `redis · ${db} db`, err?"unreachable":"ok", err||"");
+  }
+  html += card(n.alive?"ok":"bad", "trading node", n.alive?"running":(n.age==null?"not started":"not responding"),
+               n.age!=null ? `heartbeat ${n.age}s ago · pid ${n.pid||"?"}${n.session?` · up since ${new Date(n.session).toLocaleTimeString("en-GB",{hour12:false})}`:""}${n.venue?` · ${n.sandbox?"sandbox":"LIVE"} ${n.venue}`:""}` : "start it with launch.bat");
+  if(n.held_writes) html += card("warn", "held writes", n.held_writes, "events waiting for Redis; flushed on reconnect");
+  html += card(h.postgres?"warn":"ok", "postgres (chart history)", h.postgres?"unavailable":"ok", h.postgres ? `${h.postgres} — charts fall back to Redis history` : "");
+  const s = rep.summary || {};
+  html += card(rep.status==="fail"?"bad":rep.status==="warn"?"warn":"ok", "consistency", (rep.status||"?").toUpperCase(),
+               `${s.pass||0} pass · ${s.warn||0} warn · ${s.fail||0} fail · ${s.skip||0} skipped`);
+  cards.innerHTML = html;
+  document.getElementById("hvSummary").textContent = `checked ${new Date(rep.ts*1000).toLocaleTimeString("en-GB",{hour12:false})}`;
+  const onlyIssues = document.getElementById("hvOnlyIssues").checked;
+  const order = {fail:0, warn:1, pass:2, skip:3};
+  const checks = (rep.checks||[]).filter(c=>!onlyIssues || c.status==="fail" || c.status==="warn")
+    .sort((a,b)=>order[a.status]-order[b.status]);
+  rows.innerHTML = checks.length ? checks.map(c=>`<div class="hv-row"><div class="st ${c.status}">${c.status}</div><div>
+      <div class="ttl">${_esc(c.title)}</div><div class="det">${_esc(c.detail)}</div>
+      ${c.items&&c.items.length?`<div class="items">${c.items.map(_esc).join("\n")}</div>`:""}</div></div>`).join("")
+    : '<div class="pos-empty" style="padding:14px;">every check passes</div>';
+}
+function openHealth(){
+  refreshHealth(false);
+  if(_healthTimer) clearInterval(_healthTimer);
+  _healthTimer = setInterval(()=>refreshHealth(false), 10000);
+}
+
+// ---------- node status pill ----------
+function _updateNodePill(){
+  const pill = document.getElementById("nodePill"), txt = document.getElementById("nodePillTxt");
+  const ts = lastPortfolio && lastPortfolio.ts;
+  if(!ts){ pill.className = "pill"; txt.textContent = wsReady ? "node: no data" : "server offline"; return; }
+  const age = (Date.now() - ts) / 1000;
+  pill.className = "pill " + (age < 5 ? "ok" : age < 30 ? "warn" : "bad");
+  txt.textContent = age < 5 ? "node live" : `node silent ${age<120?Math.round(age)+"s":Math.round(age/60)+"m"}`;
+}
+setInterval(_updateNodePill, 1000);
+
 let ws=null, wsReady=false, pktWS=null;
+let _wsDownSince = null, _wsDownNotified = false;
 const panels = {};         // sym -> {ticks:[{t,v,q}], bars:[{t,o,h,l,c,v}], window, timeframe}
 let active = null;         // selected symbol
 
@@ -593,17 +939,30 @@ function connectWS(){
   ws = new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host+"/ws?mode="+currentMode);
   ws.onopen = () => {
     wsReady=true; setConn(true);
+    if(_wsDownNotified) localNote("success", "Reconnected to the dashboard server", "", {key:"ws"});
+    _wsDownSince = null; _wsDownNotified = false;
     for(const s in panels) sub(s, panels[s].window);
     // Restore the symbol that was active the last time we were in this mode
     const prev = _lastActive[currentMode];
     if(prev && !panels[prev]) addSymbol(prev);
   };
-  ws.onclose = () => { wsReady=false; setConn(false); setTimeout(connectWS,1000); };
+  ws.onclose = () => {
+    wsReady=false; setConn(false);
+    if(_wsDownSince===null) _wsDownSince = Date.now();
+    if(!_wsDownNotified && Date.now()-_wsDownSince > 4000){
+      _wsDownNotified = true;
+      localNote("error", "Lost connection to the dashboard server",
+        "Reconnecting every second. If this persists, the uvicorn window was closed: run launch.bat.", {key:"ws"});
+    }
+    setTimeout(connectWS,1000);
+  };
   ws.onerror = () => { try{ws.close();}catch(e){} };
   ws.onmessage = (e) => {
     totalBytes += e.data.length;
     let m; try{ m=JSON.parse(e.data); }catch(_){ return; }
-    if(m.type==="history") onHistory(m);
+    if(m.type==="notification") onNotification(m);
+    else if(m.type==="command_result"){ if(!m.ok) localNote("error", "Command refused", m.error||"", {key:"cmd:ws"}); }
+    else if(m.type==="history") onHistory(m);
     else if(m.type==="ticks") onTicks(m);
     else if(m.type==="hist_ticks") onHistTicks(m);
     else if(m.type==="bar_history") onBarHistory(m);
@@ -740,7 +1099,7 @@ function _clampOffset(p){
   else { const tfsec=TF_SEC[p.timeframe]||60; const bars=p.barsByTf[p.timeframe]||[]; if(bars.length>1) span=bars[bars.length-1].t-bars[0].t+tfsec; }
   p.offset=Math.max(0, Math.min(p.offset||0, Math.max(0, span-wsec)));
 }
-function render(){ if(rafPending) return; rafPending=true; requestAnimationFrame(draw); }
+function render(){ if(rafPending) return; rafPending=true; requestAnimationFrame(()=>{ draw(); updateViewButtons(); }); }
 function showEmpty(on){ document.getElementById("chartEmpty").style.display = on?"flex":"none"; }
 
 let mouse = null; // {x, y} in CSS pixels, or null when outside canvas
@@ -879,6 +1238,37 @@ function _markerStyle(type){
   if(type==="short") return {color:"#FF4D67", up:true, label:"short"};
   return {color:getCss("--dim-2"), up:false, label:"exit"};
 }
+// Position shading: one band per live-testing position from entry to exit
+// (open positions run to the right edge). Colour by result, as in the
+// backtester: green = realised/unrealised profit, red = loss; open ones are
+// lighter with a dashed edge at entry.
+function drawPositionShading(ctx,instrument,X,t0,w,ch){
+  const cb=document.getElementById("cbShade"); if(!cb || !cb.checked) return;
+  const lp=lastPortfolio; if(!lp||!instrument) return;
+  const band=(ts,te,win,open)=>{
+    let xa=X(ts), xb=te==null ? w : X(te);
+    if(xb<0 || xa>w) return;
+    xa=Math.max(0,xa); xb=Math.min(w,xb);
+    ctx.fillStyle = win ? (open?"rgba(38,166,154,0.10)":"rgba(38,166,154,0.18)")
+                        : (open?"rgba(239,83,80,0.10)":"rgba(239,83,80,0.18)");
+    ctx.fillRect(xa,0,Math.max(1,xb-xa),ch);
+    if(open && X(ts)>=0){
+      ctx.save(); ctx.strokeStyle=win?"rgba(38,166,154,0.7)":"rgba(239,83,80,0.7)";
+      ctx.setLineDash([3,3]); ctx.beginPath(); ctx.moveTo(xa+0.5,0); ctx.lineTo(xa+0.5,ch); ctx.stroke(); ctx.restore();
+    }
+  };
+  ctx.save();
+  for(const p of (lp.closed_positions||[])){
+    if(p.instrument!==instrument||!p.ts_opened||!p.ts_closed) continue;
+    if(p.ts_closed/1000<t0) continue;
+    band(p.ts_opened/1000, p.ts_closed/1000, (p.realized||0)>=0, false);
+  }
+  for(const p of (lp.positions||[])){
+    if(p.instrument!==instrument||!p.ts_opened) continue;
+    band(p.ts_opened/1000, null, (p.unrealized||0)>=0, true);
+  }
+  ctx.restore();
+}
 function drawTradeMarkers(ctx,instrument,X,Y,t0,w,ch,snapBars,tfsec){
   const cbF=document.getElementById("cbFlags"); if(cbF && !cbF.checked) return;  // Flags toggle
   for(const m of _tradeMarkers(instrument)){
@@ -921,12 +1311,13 @@ function drawLine(ctx,p,w,h,actInds){
   const wsec=_vsec(p), latest=p.ticks[p.ticks.length-1].t, Rbase=latest, t0=Rbase-wsec-(p.offset||0);
   p._view={t0,wsec,pw,Rbase};   // stashed for the wheel/drag handlers
   let lo=Infinity, hi=-Infinity;
-  for(const d of p.ticks){ if(d.t<t0) continue; if(d.v<lo)lo=d.v; if(d.v>hi)hi=d.v; }
+  for(const d of p.ticks){ if(d.t<t0||d.t>t0+wsec) continue; if(d.v<lo)lo=d.v; if(d.v>hi)hi=d.v; }
   if(lo===Infinity){ return; }
   const pad=(hi-lo)*0.08||1; lo-=pad; hi+=pad;
   const X=t=>(t-t0)/wsec*pw, Y=v=>ch-(v-lo)/(hi-lo)*ch;
   gridY(ctx,pw,ch,lo,hi);
   drawXAxis(ctx,pw,ch,t0,wsec);
+  drawPositionShading(ctx,active,X,t0,pw,ch);
   const lastV=p.ticks[p.ticks.length-1].v;
   const up = lastV >= p.ticks[0].v;
   ctx.strokeStyle=up?BIN_GREEN:BIN_RED; ctx.lineWidth=1.5; ctx.beginPath();
@@ -1010,7 +1401,8 @@ function drawCandles(ctx,p,w,h,actInds){
   const Rbase=latest+tfsec/2+rightPad;
   const t0=Rbase-wsec-(p.offset||0);
   p._view={t0,wsec,pw,Rbase};   // stashed for the wheel/drag handlers
-  const inWin=allBars.filter(b=>b.t>=t0);
+  // visible bars only (upper bound too) so a panned-back view scales to what's on screen
+  const inWin=allBars.filter(b=>b.t>=t0 && b.t<=t0+wsec+tfsec);
   if(!inWin.length){ showEmpty(true); return; }
   let lo=Infinity, hi=-Infinity;
   for(const b of inWin){ if(b.l<lo)lo=b.l; if(b.h>hi)hi=b.h; }
@@ -1018,6 +1410,7 @@ function drawCandles(ctx,p,w,h,actInds){
   const X=t=>(t-t0)/wsec*pw, Y=v=>ch-(v-lo)/(hi-lo)*ch;
   gridY(ctx,pw,ch,lo,hi);
   drawXAxis(ctx,pw,ch,t0,wsec);
+  drawPositionShading(ctx,active,X,t0,pw,ch);
   const candlesInView = wsec/tfsec;
   const cw = Math.max(2, pw/candlesInView*0.85);
   const g=BIN_GREEN, r=BIN_RED;
@@ -1104,6 +1497,30 @@ _cv.addEventListener("wheel", e=>{
   document.getElementById("liveBtn").style.display = p.offset>0?"flex":"none";
   render();
 },{passive:false});
+// Reset view: default zoom (the panel's window) and back to the latest data.
+// Only the view changes; data, timeframe and overlays are left alone.
+function resetView(){
+  if(!active || !panels[active]) return;
+  const p=panels[active];
+  p.viewSec=undefined; p.offset=0;
+  document.getElementById("liveBtn").style.display="none";
+  updateViewButtons();
+  render();
+}
+// "reset" shows only when the view differs from the default
+function updateViewButtons(){
+  const p=active && panels[active];
+  const changed=!!(p && (p.viewSec || (p.offset||0)>0));
+  const rb=document.getElementById("resetBtn");
+  rb.style.display=changed?"flex":"none";
+  rb.classList.toggle("shift", document.getElementById("liveBtn").style.display!=="none");
+}
+document.getElementById("resetBtn").addEventListener("click", resetView);
+document.getElementById("chart").addEventListener("dblclick", resetView);
+document.addEventListener("keydown", e=>{
+  if((e.key==="r"||e.key==="R") && !e.ctrlKey && !e.metaKey && !e.altKey &&
+     !/^(INPUT|TEXTAREA|SELECT)$/.test((e.target&&e.target.tagName)||"")) resetView();
+});
 document.getElementById("liveBtn").addEventListener("click",()=>{
   if(!active) return;
   panels[active].offset=0;
@@ -1144,6 +1561,20 @@ const orderState = {};   // stratId -> {pending: N}
 const orderHistory = {}; // stratId -> [{instrument, side, qty, status, ts}]
 const MAX_ORDER_HISTORY = 100;
 
+// [css class, label, tooltip] for a strategy's real status from the node.
+function _stateBadge(st){
+  if(!st) return ["", "?", "no status reported by the node"];
+  if(st.state && st.state!=="RUNNING") return ["exit", st.state, `component state ${st.state}: cannot trade or exit`];
+  if(st.exiting) return ["exit", "EXITING", "closing all positions"];
+  if(st.armed){
+    if(st.warming || (st.cold||[]).length) return ["warm", `WARMING ${st.warm}/${st.tradeable}`, `${st.warming} history request(s) outstanding, ${(st.cold||[]).length} cold`];
+    if((st.stale||[]).length) return ["warm", "STALE FEED", `no bars from ${st.stale.join(", ")}`];
+    return ["run", "RUNNING", `${st.tradeable} instruments trading`];
+  }
+  if(st.open_positions) return ["warm", `PAUSED · ${st.open_positions} pos`, "paused with open positions: nothing is managing them"];
+  return ["", "IDLE", "not trading; press Start"];
+}
+
 function onPortfolio(m){
   lastPortfolio = m;
   // Overall PnL tiles
@@ -1166,17 +1597,22 @@ function onPortfolio(m){
   if(!strats.length){
     el.innerHTML='<div style="color:var(--dim-2);font-size:10.5px;padding:4px 11px;">no active strategies</div>';
   } else {
+    // Net PnL per strategy in one pass (closed_positions can be large).
+    const netBy={};
+    const bump=(sid,v)=>{ if(sid) netBy[sid]=(netBy[sid]||0)+(v||0); };
+    for(const p of (m.positions||[])) bump(p.strategy,(p.unrealized||0)+(p.realized||0));
+    for(const p of (m.closed_positions||[])) bump(p.strategy,p.realized||0);
     el.innerHTML=strats.map(sid=>{
-      const metrics=(m.metrics||{})[sid]||{};
-      const px=metrics.last_close!=null?`<span class="sr-px">${fmt(metrics.last_close)}</span>`:"";
       const safe=sid.replace(/[^a-zA-Z0-9]/g,"_");
-      const n=(orderState[sid]||{}).pending||0;
+      const n=_pendingOrders(sid);
       const badge=`<span class="sr-pending" id="srp-${safe}">${n>0?`● ${n} pending`:""}</span>`;
-      const state=(m.strategy_states||{})[sid]||"RUNNING";
-      const stateDot=`<span style="font-size:9px;font-weight:700;margin-left:5px;color:${state==="RUNNING"?"var(--green)":"var(--dim-2)"};">${state==="RUNNING"?"▶":"⏸"}</span>`;
-      return `<div class="strat-row" id="sr-${safe}" onclick="openStratModal('${sid}')"><span class="sr-name">${sid}</span>${stateDot}${badge}${px}</div>`;
+      const [cls, label, tip] = _stateBadge((m.strategy_status||{})[sid]);
+      const net=netBy[sid];
+      const netTag=net!=null?`<span class="sr-px ${pnlClass(net)}" style="margin-left:6px;">${fmtSigned(net)}</span>`:"";
+      return `<div class="strat-row" id="sr-${safe}" data-sid="${_esc(sid)}" onclick="openStratModal(this.dataset.sid)" title="${_esc(tip)}"><span class="sr-name">${_esc(sid)}</span><span class="sr-state ${cls}">${label}</span>${badge}${netTag}</div>`;
     }).join("");
   }
+  _updateNodePill();
   // Refresh modal if open
   if(activeModal) _populateModal(activeModal);
   // Refresh the Positions tab if it's the active view
@@ -1384,20 +1820,24 @@ function switchView(view){
   document.getElementById("chartsView").style.display = view==="charts"?"flex":"none";
   document.getElementById("positionsView").style.display = view==="positions"?"block":"none";
   document.getElementById("accountView").style.display = view==="account"?"block":"none";
+  document.getElementById("healthView").style.display = view==="health"?"block":"none";
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active", t.dataset.view===view));
+  if(view!=="account" && _acctPollTimer){ clearInterval(_acctPollTimer); _acctPollTimer=null; }
+  if(view!=="health" && _healthTimer){ clearInterval(_healthTimer); _healthTimer=null; }
   if(view==="positions"){
     if(lastPortfolio) renderPositions();
     else _fetchPositions();
   }
   else if(view==="account") openAccount();
-  else { if(_acctPollTimer){ clearInterval(_acctPollTimer); _acctPollTimer=null; } render(); }
+  else if(view==="health") openHealth();
+  else render();
 }
 
 async function _fetchPositions(){
   try{
-    const d = await (await fetch(`/api/${currentMode}/positions`)).json();
+    const d = await apiGet(`/api/${currentMode}/positions`, "positions", _fetchPositions);
     if(d && !lastPortfolio){
-      lastPortfolio = {type:"portfolio", positions: d.positions||[], closed_positions: d.closed_positions||[], pnl: d.pnl||{}, strategies:[], strategy_states:{}, metrics:{}, overall_pnl:{}};
+      lastPortfolio = {type:"portfolio", positions: d.positions||[], closed_positions: d.closed_positions||[], pnl: d.pnl||{}, strategies:[], strategy_states:{}, strategy_status:{}, metrics:{}, overall_pnl:{}};
     }
   }catch(e){}
   renderPositions();
@@ -1426,7 +1866,7 @@ async function openAccount(){
 
 async function _fetchAccountEquity(){
   try{
-    const d = await (await fetch(`/api/${currentMode}/account/equity`)).json();
+    const d = await apiGet(`/api/${currentMode}/account/equity`, "account equity", _fetchAccountEquity);
     accountSeries = (d && d.points) || [];
     accountPeak   = (d && d.peak != null) ? d.peak : ACCOUNT_START;
   }catch(e){ if(!Array.isArray(accountSeries)) accountSeries=[]; }
@@ -1697,6 +2137,133 @@ function _drawAcZoom(){
   document.addEventListener("keydown", e=>{ if(e.key==="Escape") closeAcZoom(); });
 })();
 
+// ---------- strategy status (as the node reports it) ----------
+function _statusHTML(sid, st){
+  if(!st) return '<div class="st-list">no status from the node yet — is it running? (Health tab)</div>';
+  const [cls, label] = _stateBadge(st);
+  const color = cls==="run"?"up":cls==="exit"?"down":"";
+  const cell = (lbl, val, c="") => `<div class="stat-cell"><div class="lbl">${lbl}</div><div class="val ${c}">${_esc(val)}</div></div>`;
+  let html = `<div class="st-grid">
+    ${cell("state", label, color)}
+    ${cell("instruments", st.armed?`${st.tradeable}/${st.instruments}`:st.instruments)}
+    ${cell("warm", st.armed?`${st.warm}/${st.tradeable}`:"–", st.armed&&st.warm<st.tradeable?"":"up")}
+    ${cell("open positions", st.open_positions)}
+    ${cell("working orders", st.working_orders)}
+    ${cell("bars", st.bar_spec||"–")}
+  </div>`;
+  const list = (title, xs) => xs&&xs.length ? `<div class="st-list"><b>${title} (${xs.length}):</b> ${xs.map(_esc).join(", ")}</div>` : "";
+  html += list("missing on venue", st.missing) + list("not warm yet", st.cold) + list("no recent bars", st.stale);
+  if(st.armed && (st.cold||[]).length && !st.warming)
+    html += `<button class="btn cmdbtn" style="font-size:10.5px;padding:4px 10px;margin-top:4px;" onclick="stratCmd('rewarm')">⟳ Re-warm ${st.cold.length} cold instrument(s)</button>`;
+  if(!st.armed && st.open_positions)
+    html += `<div class="st-list" style="color:var(--amber);">Paused with ${st.open_positions} open position(s): nothing manages them until you Start or Close All.</div>`;
+  return html;
+}
+
+// ---------- per-strategy stat panel ----------
+// Derived from the strategy's own open/closed positions, so it works the same
+// for live strategies and for backtest results merged in test mode.
+function _closedStats(closed){
+  const wins=closed.filter(p=>(p.realized||0)>0), losses=closed.filter(p=>(p.realized||0)<0);
+  const grossWin=wins.reduce((s,p)=>s+(p.realized||0),0);
+  const grossLoss=Math.abs(losses.reduce((s,p)=>s+(p.realized||0),0));
+  const n=closed.length;
+  // cumulative realized curve (chronological) -> sparkline + peak-to-trough drawdown
+  const seq=[...closed].sort((a,b)=>(a.ts_closed||0)-(b.ts_closed||0));
+  const curve=[]; let cum=0, peak=0, maxDD=0, holdSum=0, holdN=0, ccy="", best=null, worst=null;
+  for(const p of seq){
+    const r=p.realized||0;
+    cum+=r; curve.push(cum);
+    if(cum>peak) peak=cum;
+    if(peak-cum>maxDD) maxDD=peak-cum;
+    if(best==null||r>best) best=r;
+    if(worst==null||r<worst) worst=r;
+    if(!ccy) ccy=p.ccy;
+    const a=p.ts_opened||0, b=p.ts_closed||0;
+    if(a&&b&&b>a){ holdSum+=b-a; holdN++; }
+  }
+  return {ccy, realizedClosed:cum, trades:n, wins:wins.length, losses:losses.length,
+    winRate:n?wins.length/n*100:null, avgWin:wins.length?grossWin/wins.length:null,
+    avgLoss:losses.length?-grossLoss/losses.length:null,
+    profitFactor:grossLoss>0?grossWin/grossLoss:(grossWin>0?Infinity:null),
+    expectancy:n?(grossWin-grossLoss)/n:null, best, worst, avgHoldMs:holdN?holdSum/holdN:null, maxDD, curve};
+}
+// _closedStats runs on every portfolio frame and a backtest can close tens of
+// thousands of positions, so memoise it on the closed set's shape.
+const _closedStatsCache={};
+function _closedStatsCached(sid, closed){
+  const key=closed.length+"|"+(closed.length?(closed[0].id||"")+"|"+(closed[closed.length-1].id||"")+"|"+(closed[0].realized||0):"");
+  const hit=_closedStatsCache[sid];
+  if(hit && hit.key===key) return hit.stats;
+  const stats=_closedStats(closed);
+  _closedStatsCache[sid]={key, stats};
+  return stats;
+}
+function _stratStats(sid, open, closed){
+  const cs=_closedStatsCached(sid, closed);
+  let unreal=0, realOpen=0, exposure=0, ccy="";
+  for(const p of open){
+    unreal+=p.unrealized||0; realOpen+=p.realized||0;
+    if(!ccy) ccy=p.ccy;
+    exposure+=Math.abs((p.qty||0)*(p.mark||p.avg_px||0));
+  }
+  const realized=realOpen+cs.realizedClosed;
+  return {...cs, ccy:ccy||cs.ccy||"USDT", net:realized+unreal, realized, unrealized:unreal, exposure, openCount:open.length};
+}
+function _statCell(lbl, val, cls, sub){
+  return `<div class="stat-cell"><div class="lbl">${lbl}</div><div class="val ${cls||""}">${val}</div>${sub?`<div class="sub">${sub}</div>`:""}</div>`;
+}
+function _fmtDur(ms){
+  if(ms==null) return "–";
+  const s=Math.floor(ms/1000); if(s<60) return s+"s";
+  const m=Math.floor(s/60); if(m<60) return m+"m "+(s%60)+"s";
+  const h=Math.floor(m/60); return h<24 ? h+"h "+(m%60)+"m" : Math.floor(h/24)+"d "+(h%24)+"h";
+}
+// inline SVG sparkline of the cumulative realized curve, downsampled for long backtests
+function _sparkSVG(src){
+  if(!src || src.length<2) return "";
+  const MAXP=240;
+  let curve=src;
+  if(src.length>MAXP){
+    const stride=Math.ceil(src.length/MAXP);
+    curve=src.filter((_,i)=>i%stride===0);
+    if(curve[curve.length-1]!==src[src.length-1]) curve.push(src[src.length-1]);
+  }
+  const W=200, H=34, PAD=2;
+  let lo=Math.min(0,...curve), hi=Math.max(0,...curve);
+  if(hi===lo){ hi+=1; lo-=1; }
+  const x=i=>PAD+i*(W-2*PAD)/(curve.length-1), y=v=>H-PAD-(v-lo)/(hi-lo)*(H-2*PAD);
+  const pts=curve.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const col=curve[curve.length-1]>=0?"var(--green)":"var(--red)";
+  return `<svg class="ss-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    <line x1="0" y1="${y(0).toFixed(1)}" x2="${W}" y2="${y(0).toFixed(1)}" stroke="var(--line)" stroke-width="1"/>
+    <polyline points="${pts}" fill="none" stroke="${col}" stroke-width="1.5" vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg>`;
+}
+function _stratStatsHTML(sid, open, closed, state, variant){
+  const s=_stratStats(sid, open, closed), cc=s.ccy, money=v=>v==null?"–":fmtSigned(v);
+  const pf=s.profitFactor, pfTxt=pf==null?"–":(pf===Infinity?"∞":pf.toFixed(2));
+  const cells=[
+    _statCell("realized", money(s.realized)+" "+cc, pnlClass(s.realized)),
+    _statCell("unrealized", money(s.unrealized)+" "+cc, pnlClass(s.unrealized)),
+    _statCell("trades", String(s.trades), "", s.openCount+" open"),
+    _statCell("win rate", s.winRate==null?"–":s.winRate.toFixed(1)+"%", s.winRate==null?"":(s.winRate>50?"up":s.winRate<50?"down":""), s.trades?`${s.wins}W / ${s.losses}L`:""),
+    _statCell("avg win", money(s.avgWin), s.avgWin==null?"":"up"),
+    _statCell("avg loss", money(s.avgLoss), s.avgLoss==null?"":"down"),
+    _statCell("profit factor", pfTxt, pf==null?"":(pf>=1?"up":"down")),
+    _statCell("expectancy", money(s.expectancy), s.expectancy==null?"":pnlClass(s.expectancy), "per trade"),
+    _statCell("best trade", money(s.best), s.best==null?"":"up"),
+    _statCell("worst trade", money(s.worst), s.worst==null?"":"down"),
+    _statCell("max drawdown", s.trades?"-"+s.maxDD.toFixed(2):"–", s.maxDD>0?"down":"", "realized"),
+    _statCell("avg hold", _fmtDur(s.avgHoldMs)),
+    _statCell("exposure", s.openCount?"$"+s.exposure.toFixed(2):"–", "", "open notional"),
+  ].join("");
+  const head = variant==="modal" ? "" : `<div class="ss-head"><span class="ss-name">${_esc(_stratShort(sid))}</span>
+      <span class="ss-state ${state==="RUNNING"?"on":""}">${state==="RUNNING"?"▶ running":"⏸ stopped"}</span>
+      <span class="ss-net ${pnlClass(s.net)}">${money(s.net)} ${cc}</span></div>`;
+  const spark=_sparkSVG(s.curve);
+  return `<div class="strat-stats${variant==="modal"?" in-modal":""}">${head}<div class="stat-grid">${cells}</div>${spark?`<div class="ss-spark-lbl">cumulative realized pnl</div>${spark}`:""}</div>`;
+}
+
 function renderPositions(){
   const m=lastPortfolio; if(!m) return;
   const open=(m.positions||[]).slice();
@@ -1724,22 +2291,16 @@ function renderPositions(){
   const now=Date.now();
 
   if(_posByStrategy){
-    // Group by strategy
-    const strats=new Set([...open.map(p=>p.strategy||""), ...closed.map(p=>p.strategy||"")]);
+    // One stat panel per strategy: every registered strategy, even one that
+    // hasn't traded yet, plus any strategy that only appears in the positions.
+    const strats=new Set([...(m.strategies||[]), ...open.map(p=>p.strategy||""), ...closed.map(p=>p.strategy||"")]);
+    const states=m.strategy_states||{};
     let html="";
-    for(const sid of [...strats].sort()){
+    for(const sid of [...strats].filter(Boolean).sort()){
       const sOpen=open.filter(p=>(p.strategy||"")=== sid);
       const sClosed=closed.filter(p=>(p.strategy||"")=== sid);
-      let sUnreal=0, sReal=0;
-      for(const p of sOpen){ sUnreal+=p.unrealized||0; sReal+=p.realized||0; }
-      for(const p of sClosed){ sReal+=p.realized||0; }
-      const sTotal=sUnreal+sReal;
       html+=`<div class="pos-strat-group">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
-          <span class="pos-strat-label">${_stratShort(sid)}</span>
-          <span style="font-size:10px;color:var(--dim);">open <b>${sOpen.length}</b> · closed <b>${sClosed.length}</b></span>
-          <span style="font-size:10px;margin-left:auto;" class="${pnlClass(sTotal)}">total ${fmtSigned(sTotal)} ${cc}</span>
-        </div>
+        ${_stratStatsHTML(sid, sOpen, sClosed, states[sid]||"STOPPED")}
         <div class="pos-tables" style="margin-bottom:0;">
           <div class="pos-table-wrap"><div class="pos-table-scroll"><table class="pos-table">${_openTableHTML(sOpen,now)}</table></div></div>
           <div class="pos-table-wrap"><div class="pos-table-scroll"><table class="pos-table">${_closedTableHTML(sClosed)}</table></div></div>
@@ -1758,34 +2319,39 @@ function renderPositions(){
   }
 }
 
+// Orders are tracked by client order id (the node publishes every order event
+// from one message-bus subscription), so a fill always updates the right order.
+const TERMINAL_ORDER = new Set(["filled","canceled","rejected","denied","expired"]);
+const ORDER_ROW_CLASS = {submitted:"pending", accepted:"pending", partially_filled:"pending", triggered:"pending",
+  updated:"pending", filled:"accepted", rejected:"rejected", denied:"rejected", cancel_rejected:"rejected",
+  modify_rejected:"rejected", canceled:"canceled", expired:"canceled"};
+function _pendingOrders(sid){
+  const book=orderHistory[sid]; if(!book) return 0;
+  // events without an order id (old node) can't be matched to a fill: never "pending"
+  let n=0; for(const o of book.values()) if(o.has_id && !TERMINAL_ORDER.has(o.status)) n++;
+  return n;
+}
 function onOrderEvent(m){
-  const sid=m.strategy;
-  if(!orderState[sid]) orderState[sid]={pending:0};
-  if(!orderHistory[sid]) orderHistory[sid]=[];
-  const state=orderState[sid];
-  const hist=orderHistory[sid];
-
-  // Rolling per-order log: each order starts pending, then becomes accepted or
-  // rejected, and stays in the list.
-  if(m.status==="submitted"){
-    state.pending=Math.max(0,state.pending+1);
-    hist.unshift({instrument:m.instrument,side:m.side,qty:m.qty,price:m.price,status:"pending",ts:m.ts});
-    if(hist.length>MAX_ORDER_HISTORY) hist.length=MAX_ORDER_HISTORY;
-  } else {
-    state.pending=Math.max(0,state.pending-1);
-    const st = m.status==="filled" ? "accepted" : m.status;  // rejected / canceled kept as-is
-    const entry=hist.find(o=>o.instrument===m.instrument && o.status==="pending");
-    if(entry){ entry.status=st; if(m.price) entry.price=m.price; if(m.side) entry.side=m.side; }
-    else { hist.unshift({instrument:m.instrument,side:m.side,qty:m.qty,price:m.price,status:st,ts:m.ts});
-           if(hist.length>MAX_ORDER_HISTORY) hist.length=MAX_ORDER_HISTORY; }
-  }
+  const sid=m.strategy; if(!sid) return;
+  const book = orderHistory[sid] || (orderHistory[sid] = new Map());
+  const id = m.order_id || `${m.instrument}|${m.ts}`;         // pre-upgrade events had no id
+  const prev = book.get(id);
+  const rec = prev || {instrument:m.instrument, first_ts:m.ts, has_id:!!m.order_id};
+  // a late non-terminal event (e.g. 'accepted' after 'filled') must not reopen an order
+  if(!(prev && TERMINAL_ORDER.has(prev.status) && !TERMINAL_ORDER.has(m.status))) rec.status = m.status;
+  rec.side = m.side || rec.side; rec.qty = m.qty || rec.qty; rec.filled = m.filled || rec.filled;
+  rec.price = m.price || rec.price; rec.reason = m.reason || rec.reason || ""; rec.ts = m.ts;
+  if(prev) book.delete(id);
+  book.set(id, rec);                                           // Map order = recency
+  while(book.size > MAX_ORDER_HISTORY) book.delete(book.keys().next().value);
 
   const safe=sid.replace(/[^a-zA-Z0-9]/g,"_");
+  const n=_pendingOrders(sid);
   const badge=document.getElementById("srp-"+safe);
-  if(badge) badge.textContent=state.pending>0?`● ${state.pending} pending`:"";
+  if(badge) badge.textContent=n>0?`● ${n} pending`:"";
   const row=document.getElementById("sr-"+safe);
   if(row){
-    const cls=m.status==="filled"?"flash-fill":m.status==="rejected"?"flash-reject":null;
+    const cls=m.status==="filled"?"flash-fill":(ORDER_ROW_CLASS[m.status]==="rejected")?"flash-reject":null;
     if(cls){ row.classList.add(cls); setTimeout(()=>row.classList.remove(cls),800); }
   }
   if(activeModal===sid) _renderOrdersList(sid);
@@ -1793,31 +2359,41 @@ function onOrderEvent(m){
 
 function _renderOrdersList(sid){
   const el=document.getElementById("ordersList"); if(!el) return;
-  const hist=orderHistory[sid]||[];
-  if(!hist.length){ el.innerHTML='<div class="pos-empty">no orders yet</div>'; return; }
-  el.innerHTML=hist.map(o=>{
-    const sym=o.instrument.split(".")[0];
+  const book=orderHistory[sid];
+  if(!book || !book.size){ el.innerHTML='<div class="pos-empty">no orders yet</div>'; return; }
+  el.innerHTML=[...book.values()].reverse().map(o=>{
+    const sym=(o.instrument||"").split(".")[0];
     const sideCls=o.side==="BUY"?"up":(o.side==="SELL"?"down":"");
     const t=o.ts?new Date(o.ts*1000).toLocaleTimeString("en-GB",{hour12:false}):"";
-    const px=o.price?parseFloat(o.price):null;
-    return `<div class="order-row status-${o.status}">
-      <div class="or-top"><span class="or-sym">${sym}</span><span class="or-status ${o.status}">${o.status}</span></div>
-      <div class="or-detail"><span class="${sideCls}">${o.side||"–"}</span> ${o.qty?fmtQty(parseFloat(o.qty)):"–"}${px!=null?" @ "+fmt(px):""} &nbsp;·&nbsp; ${t}</div>
+    const px=o.price&&!isNaN(parseFloat(o.price))?parseFloat(o.price):null;
+    const cls=ORDER_ROW_CLASS[o.status]||"pending";
+    return `<div class="order-row status-${cls}">
+      <div class="or-top"><span class="or-sym">${_esc(sym)}</span><span class="or-status ${cls}">${_esc((o.status||"").replace("_"," "))}</span></div>
+      <div class="or-detail"><span class="${sideCls}">${_esc(o.side||"–")}</span> ${o.qty?fmtQty(parseFloat(o.qty)):"–"}${px!=null?" @ "+fmt(px):""} &nbsp;·&nbsp; ${t}</div>
+      ${o.reason&&cls==="rejected"?`<div class="or-detail" style="color:var(--red);">${_esc(o.reason)}</div>`:""}
     </div>`;
   }).join("");
 }
 
+const CMD_LABEL = {start_strategy:"Start", stop_strategy:"Pause", close_strategy:"Close all",
+                   export_csv:"Export CSV", rewarm:"Re-warm"};
 async function stratCmd(action){
   if(!activeModal) return;
-  // Position-history CSV is written server-side by the node on close_strategy.
-  await fetch(`/api/${currentMode}/command`,{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({action, strategy_id:activeModal})});
+  const sid=activeModal, label=`${CMD_LABEL[action]||action} ${sid}`;
+  if(action==="close_strategy"){
+    const n=(lastPortfolio&&lastPortfolio.positions||[]).filter(p=>p.strategy===sid).length;
+    if(!confirm(`Close ${n} open position(s) of ${sid} at market and pause the strategy?\n\nThis cannot be undone.`)) return;
+  }
+  _setCmdStatus("pending", `${CMD_LABEL[action]||action}: sending…`);
+  const r=await sendCommand(currentMode, {action, strategy_id:sid}, label);
+  _setCmdStatus(r.ok?"pending":"error", r.ok?`${CMD_LABEL[action]||action}: waiting for the node…`:`not sent: ${r.error}`);
 }
 
 function openStratModal(stratId){
   activeModal=stratId;
   _modalClosedKey=""; _modalClosedHTML="";  // force rebuild for new strategy
   _resetPosFlash();
+  _setCmdStatus("", ""); _cmdChanged();
   _populateModal(stratId);
   _renderOrdersList(stratId);
   // show correct controls for current mode
@@ -1849,6 +2425,9 @@ function _populateModal(stratId){
   _prevOpenIds=curOpen; _prevClosedIds=curClosed;
   document.getElementById("modalStratName").textContent=stratId;
   document.getElementById("modalDesc").textContent=metrics.description||"No description available.";
+  document.getElementById("modalStatus").innerHTML=_statusHTML(stratId, (m.strategy_status||{})[stratId]);
+  const statsEl=document.getElementById("modalStats");
+  if(statsEl) statsEl.innerHTML=_stratStatsHTML(stratId, positions, closed, (m.strategy_states||{})[stratId]||"STOPPED", "modal");
   // Per-strategy PnL: unrealized from open positions; realized from open
   // (partial closes) plus fully-closed positions.
   const byCtcy={};
@@ -2173,7 +2752,33 @@ document.getElementById("tfSlider").addEventListener("input",e=>{
   panels[active].timeframe=tfv;
   render();
 });
-document.getElementById("addBtn").addEventListener("click", ()=>{ const v=document.getElementById("addInput").value.trim(); if(v){ addSymbol(v); document.getElementById("addInput").value=""; } });
+// Turn what was typed into a real instrument id. Exact ids win; a bare name
+// resolves to its USDT perpetual first (btc / btcusdt / BTCUSDT-PERP ->
+// BTCUSDT-PERP.BINANCE_FUTURES), then spot. Anything that doesn't match is
+// refused instead of subscribing to an instrument that will never tick.
+let SYMBOLS=[], SYMSET=new Set();
+function resolveSymbol(raw){
+  const up=raw.trim().toUpperCase();
+  if(!up) return null;
+  if(SYMSET.has(up)) return up;
+  if(up.includes(".")) return null;
+  const base=up.replace(/-PERP$/,"");
+  const tries=[`${base}USDT-PERP.BINANCE_FUTURES`, `${base}-PERP.BINANCE_FUTURES`,
+               `${base}USDT.BINANCE_SPOT`, `${base}.BINANCE_SPOT`];
+  return tries.find(t=>SYMSET.has(t)) || null;
+}
+function addMsg(text){
+  const inp=document.getElementById("addInput"), m=document.getElementById("addMsg");
+  inp.classList.toggle("bad", !!text); m.textContent=text||""; m.style.display=text?"block":"none";
+  if(text){ clearTimeout(addMsg._t); addMsg._t=setTimeout(()=>addMsg(""), 4000); }
+}
+document.getElementById("addBtn").addEventListener("click", ()=>{
+  const inp=document.getElementById("addInput"), v=inp.value.trim(); if(!v) return;
+  const sym = SYMBOLS.length ? resolveSymbol(v) : v;   // list not loaded yet: take it as typed
+  if(!sym){ addMsg(`no instrument "${v}" - try e.g. BTCUSDT`); return; }
+  addMsg(""); addSymbol(sym); inp.value="";
+});
+document.getElementById("addInput").addEventListener("input", ()=>addMsg(""));
 // Header clock (IST), ticking once a second.
 (function(){
   const el=document.getElementById("hdrClock"); if(!el) return;
@@ -2195,10 +2800,10 @@ document.getElementById("bfBtn").addEventListener("click", async ()=>{
   const body = useTickBackfill
     ? {action:"backfill", instrument_id:active, start, end:end||null}
     : {action:"backfill", instrument_id:active, bar_type:barTypeFor(active, tf), start, end:end||null};
-  try{
-    const r=await fetch(`/api/${currentMode}/command`,{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify(body)});
-    if(!r.ok){ note.textContent="command channel error (server returned "+r.status+")."; return; }
+  if(!start){ note.textContent="enter a start time first."; return; }
+  {
+    const r=await sendCommand(currentMode, body, `Backfill ${active} ${tf}`);
+    if(!r.ok){ note.textContent=`backfill not sent: ${r.error}`; return; }
     note.textContent=`backfill sent for ${tf}. fetching…`;
     setLoading(true);
     // Re-pull history as data lands so it appears without a manual refresh.
@@ -2214,15 +2819,41 @@ document.getElementById("bfBtn").addEventListener("click", async ()=>{
       }, delay);
     }
     setTimeout(()=>setLoading(false), 8000);
-  }catch(e){ note.textContent="command channel not available."; setLoading(false); }
+  }
 });
 
-async function loadSymbols(){ try{ const r=await fetch("/api/symbols"); const syms=await r.json(); document.getElementById("symList").innerHTML=syms.map(s=>`<option value="${s}">`).join(""); }catch(e){} }
+async function loadSymbols(){ try{ const syms=await apiGet("/api/symbols", "instrument list", loadSymbols);
+  if(!syms.length){ localNote("warn", "No instruments known yet",
+    "The node hasn't loaded Binance instruments into Redis. Start it (launch.bat), then retry.", {key:"api:/api/symbols", retryFn:loadSymbols}); }
+  // USDT perpetuals first (what gets traded here), then other futures, then spot
+  const rank=s=>s.endsWith("USDT-PERP.BINANCE_FUTURES")?0:s.endsWith(".BINANCE_FUTURES")?1:2;
+  SYMBOLS=syms.slice().sort((a,b)=>rank(a)-rank(b)||a.localeCompare(b)); SYMSET=new Set(SYMBOLS);
+  document.getElementById("symList").innerHTML=SYMBOLS.map(s=>`<option value="${s}">`).join(""); }catch(e){} }
 document.querySelectorAll(".ind-cb input[type=checkbox]").forEach(cb=>cb.addEventListener("change",render));
+for(const id of ["cbFlags","cbShade"]){
+  const cb=document.getElementById(id); if(!cb) continue;
+  try{ const v=localStorage.getItem("chart."+id); if(v!==null) cb.checked = v==="1"; }catch(e){}
+  cb.addEventListener("change",()=>{ try{ localStorage.setItem("chart."+id, cb.checked?"1":"0"); }catch(e){} });
+}
+
+// Keep the Health tab's dot current without opening it (quietly: the WS
+// notifications already report outages).
+async function _healthDotPoll(){
+  if(document.getElementById("healthView").style.display!=="none") return;
+  try{ const r=await fetch("/api/consistency"); if(r.ok){ const rep=await r.json(); _lastReport=rep; _setHealthDot(rep.status); } }
+  catch(e){ _setHealthDot("fail"); }
+}
+document.addEventListener("click", e=>{
+  const p=document.getElementById("notifPanel");
+  if(p.classList.contains("open") && !p.contains(e.target) && !document.getElementById("bellBtn").contains(e.target)
+     && !e.target.closest(".toast")) toggleNotifPanel(false);
+});
+document.addEventListener("keydown", e=>{ if(e.key==="Escape") toggleNotifPanel(false); });
 
 // ---------- boot ----------
 setInterval(()=>{ document.getElementById("fSession").textContent=Math.floor((Date.now()-sessionStart)/1000)+"s"; document.getElementById("fBytes").textContent=fmtBytes(totalBytes); }, 1000);
-loadSymbols(); connectWS(); connectPackets();
+setInterval(_healthDotPoll, 30000);
+loadSymbols(); connectWS(); connectPackets(); _healthDotPoll();
 </script>
 </body>
 </html>
